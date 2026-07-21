@@ -1,0 +1,4 @@
+# Plugin runtime state — per-vault, never published
+data.json
+# macOS
+.DS_Store

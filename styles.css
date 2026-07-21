@@ -1,0 +1,66 @@
+.bible-search-view {
+	padding: 0;
+	overflow: hidden;
+}
+
+.bible-search-frame {
+	display: block;
+	width: 100%;
+	height: 100%;
+	border: 0;
+	background: transparent;
+}
+
+/* settings — rebuild command + quick reference */
+.bible-search-doclead {
+	margin: 0 0 1em;
+}
+
+.bible-search-cmd {
+	margin: -0.4em 0 1.4em;
+	padding: 0.7em 0.9em;
+	overflow-x: auto;
+	font-size: var(--font-smaller);
+	color: var(--text-muted);
+	background: var(--background-primary-alt);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	user-select: all;
+}
+
+.bible-search-ref {
+	margin: 0 0 0.6em;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+}
+
+.bible-search-ref summary {
+	padding: 0.6em 0.9em;
+	color: var(--text-normal);
+	cursor: pointer;
+}
+
+.bible-search-ref pre {
+	margin: 0;
+	padding: 0 0.9em 0.9em;
+	overflow-x: auto;
+	font-size: var(--font-smaller);
+	color: var(--text-muted);
+	white-space: pre-wrap;
+}
+
+/* onboarding wizard */
+.bible-search-onb-step {
+	margin: 0 0 0.8em;
+	font-size: var(--font-smaller);
+	color: var(--text-muted);
+}
+
+.bible-search-error {
+	max-width: 32em;
+	margin: 3em auto;
+	padding: 1.5em;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	color: var(--text-muted);
+}
