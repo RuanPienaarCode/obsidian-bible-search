@@ -90,3 +90,7 @@ article layout — see
 ## Licence
 
 MIT — see [LICENSE](LICENSE).
+
+That licence covers the plugin code only. Bible text downloaded by the plugin, and any
+translation you import yourself, are covered by their own licences — see
+[Translations and licensing](#translations-and-licensing) above.

@@ -7,6 +7,9 @@ on:
 
 permissions:
   contents: write
+  # Required to mint build-provenance attestations for the release assets.
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -23,6 +26,15 @@ jobs:
             echo "Obsidian matches releases to the manifest version exactly — no 'v' prefix." >&2
             exit 1
           fi
+
+      # Lets anyone verify the shipped assets came from this repo and this
+      # workflow: `gh attestation verify main.js -R RuanPienaarCode/obsidian-bible-search`
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            main.js
+            styles.css
 
       - name: Create release
         env:
