@@ -1,9 +1,11 @@
 /*
  * Bible Search — standalone Obsidian plugin.
  *
- * Hosts the generated "Bible Search.html" (self-contained, built from
- * Bible/bible-search-template.html by the tools/ pipeline) inside a
- * first-class workspace view.
+ * Hosts the generated "Bible Search.html" (built from
+ * Bible/bible-search-template.html by the tools/ pipeline or the in-app
+ * builder) inside a first-class workspace view. The page is a ~2.5 MB shell;
+ * each translation's verse text lives in Bible/search-data/bd-<TRANS>.json
+ * and is served to the page on demand through the bridge in wireBridge().
  *
  * The HTML is loaded via a blob: URL so the iframe is same-origin with
  * the plugin. That lets us intercept the obsidian://open links the
@@ -17,10 +19,35 @@
 const { Plugin, ItemView, Modal, PluginSettingTab, Setting, Notice, TFile, TFolder, normalizePath, requestUrl } = require("obsidian");
 
 const VIEW_TYPE = "bible-search-view";
+// Where the split build keeps each translation's verse text (bd-<TRANS>.json).
+// The page asks for these by id through the bridge in wireBridge(); both the
+// in-app builder below and Bible/build-bible-search.js write them here.
+const DATA_PATH = "Bible/search-data";
+// The optional content layers, in tab order. Each note layer names its source
+// folder; On This Day and Church History are assembled specially (no single
+// folder — see their builders). One registry drives the settings toggles, the
+// default settings, and the build's gating.
+// The Bible itself is not a layer — it's always present.
+const CONTENT_LAYERS = [
+	{ key: "articles",      label: "Articles",       folder: "Teaching" },
+	{ key: "topics",        label: "Topics",         folder: "Topics" },
+	{ key: "faq",           label: "FAQ",            folder: "FAQ" },
+	{ key: "history",       label: "Bible history",  folder: "Bible History" },
+	{ key: "churchhistory", label: "Church History", folder: null },
+	{ key: "onthisday",     label: "On This Day",    folder: null },
+];
+// A layer is included unless explicitly disabled — a missing/partial `layers`
+// object (older saved settings) therefore means "include everything present".
+const layerEnabled = (layers, key) => !layers || layers[key] !== false;
+
 const DEFAULT_SETTINGS = {
 	htmlPath: "Bible Search.html",
 	openNotesInNewTab: true,
 	onboarded: false,
+	// Which optional content layers to build. Bible is always included; each of
+	// these is included when enabled AND its content exists (an enabled-but-empty
+	// layer emits nothing and its tab stays hidden — see the builder + template).
+	layers: Object.fromEntries(CONTENT_LAYERS.map((l) => [l.key, true])),
 	// Resume ticket: the wizard's download picks, persisted while a setup run is
 	// unfinished. Non-null means "downloads and/or the build didn't complete" —
 	// the plugin auto-resumes on the next launch and clears it only on success.
@@ -182,7 +209,26 @@ const DOWNLOADABLE = [
 // one this release was audited with.
 const TEMPLATE_PATH = "Bible/bible-search-template.html";
 const TEMPLATE_URL =
-	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.1.0/Bible/bible-search-template.html";
+	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.2.1/Bible/bible-search-template.html";
+
+// The On This Day calendar is the one optional layer that CAN be shared as data —
+// its entries are original summaries of fixed-date Christian-year events, no
+// copyrighted text. A vault that doesn't carry the on-this-day.js source can
+// download this pre-assembled pack (the { "MM-DD": { label, entries } } map that
+// buildOnThisDay() emits) and drop it in. Served as a raw file at a pinned tag,
+// exactly like the template. (Published in the release step; until then it 404s.)
+const ONTHISDAY_PACK_PATH = "Bible/on-this-day.json";
+const ONTHISDAY_PACK_URL =
+	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.2.1/data/on-this-day.json";
+
+// Church History is the other shareable layer — the whole denominational family
+// tree ({ eras, families, nodes }) is one hand-curated, all-original module. A
+// vault without the denominations.js source downloads this pre-assembled pack,
+// served the same way as the On This Day pack. (Published in the release step;
+// until then it 404s.)
+const CHURCHHISTORY_PACK_PATH = "Bible/church-history.json";
+const CHURCHHISTORY_PACK_URL =
+	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.2.1/data/church-history.json";
 
 // Transient 429/5xx happens over ~1,200 chapter fetches — retry with enough
 // backoff (1s/2s/4s/8s) to ride out a short outage burst instead of aborting
@@ -338,7 +384,7 @@ async function importTranslation(app, spec, onProgress) {
  * the next resume. Returns the build result plus human-readable problems;
  * an empty problems list means setup is finished and the ticket can go.
  */
-async function runSetupPipeline(app, htmlPath, pending, onProgress) {
+async function runSetupPipeline(app, htmlPath, pending, onProgress, layers) {
 	const problems = [];
 	for (const spec of pending) {
 		try {
@@ -355,7 +401,7 @@ async function runSetupPipeline(app, htmlPath, pending, onProgress) {
 		await writeIfAbsent(app, TEMPLATE_PATH, res.text);
 	}
 	onProgress?.("Building the search page…");
-	const built = await buildSearchIndex(app, htmlPath, onProgress);
+	const built = await buildSearchIndex(app, htmlPath, onProgress, layers);
 	return { built, problems };
 }
 
@@ -461,12 +507,196 @@ function toParagraphs(body) {
 	flush();
 	return paras;
 }
-const isHub = (fm) => /^type:\s*\S*hub\b/mi.test(fm) || fmList(fm, "tags").some((t) => t === "hub" || t.endsWith("/hub"));
+const isHub = (fm) =>
+	/^type:\s*\S*(hub|moc)\b/mi.test(fm) ||
+	fmList(fm, "tags").some((t) => t === "hub" || t === "moc" || t.endsWith("/hub") || t.endsWith("/moc"));
 const firstHeading = (body) => (body.match(/^#\s+(.+)$/m) || [, ""])[1].trim();
 const firstUrl = (body) => (body.match(/\((https?:\/\/[^)\s]+)\)/) || [, ""])[1];
 const safeUrl = (u) => (/^https?:\/\//i.test(u || "") ? u : "");
 
-async function buildSearchIndex(app, htmlPath, onProgress) {
+/* Vault-API twin of the Node builder's collectNotes(). Indexes every .md under a
+ * folder into the shared record shape — the Articles, Topics, FAQ and History
+ * tabs are all just different folders run through this one function. sourceOf(rel)
+ * picks each result's badge label. README + hub/MOC notes are skipped. Kept in
+ * lock-step with build-bible-search.js so a page built here matches the Node one. */
+async function collectNotesFromVault(app, prefix, sourceOf) {
+	const out = [];
+	const root = app.vault.getAbstractFileByPath(normalizePath(prefix));
+	if (!(root instanceof TFolder)) return out; // absent folder → empty layer, not an error
+	const under = prefix + "/";
+	const files = app.vault.getMarkdownFiles()
+		.filter((f) => f.path.startsWith(under) && !/^readme$/i.test(f.basename))
+		.sort((a, b) => a.path.localeCompare(b.path));
+	for (const f of files) {
+		const rel = f.path;
+		const source = sourceOf(rel);
+		const raw = await app.vault.cachedRead(f);
+		const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+		const fm = fmMatch ? fmMatch[1] : "";
+		const bodyRaw = fmMatch ? fmMatch[2] : raw;
+		if (isHub(fm)) continue;
+		const paras = toParagraphs(bodyRaw);
+		if (!paras.length) continue;
+		const tagTopics = fmList(fm, "tags")
+			.map((t) => (t.startsWith("topic/") ? t.slice(6).replace(/-/g, " ") : t))
+			// Anonymized filter: ministry-specific tokens are deliberately kept OUT of the
+			// public plugin copies. The private builder's exclusion list is intentionally
+			// broader — do NOT widen this one to match it.
+			.filter((t) => !t.includes("/") && !/^(article|hub|devotional|teaching)$/i.test(t));
+		const topics = (fmList(fm, "topics").length ? fmList(fm, "topics") : tagTopics).slice(0, 6).join(", ");
+		out.push([
+			fmValue(fm, "title") || firstHeading(bodyRaw) || f.basename,
+			fmValue(fm, "author"),
+			fmValue(fm, "date"),
+			topics,
+			fmValue(fm, "excerpt") || paras[0].slice(0, 240),
+			rel.replace(/\.md$/, ""),
+			safeUrl(fmValue(fm, "source") || firstUrl(bodyRaw)),
+			paras.join("\n"),
+			source,
+		]);
+	}
+	return out;
+}
+
+/* Vault-API twin of the Node builder's buildOnThisDay(). Assembles the On This Day
+ * payload from the downloaded pack (Bible/on-this-day.json) or, failing that, the
+ * hand-curated source module (tools/data/on-this-day.js). Both are NON-markdown
+ * files, so they're read through vault.adapter rather than the note API.
+ * Every source is optional and every read is non-fatal — a vault without the data
+ * just yields {}, which the page renders as an empty (soon hidden) tab. No network. */
+const OTD_MONTHS = ["January", "February", "March", "April", "May", "June", "July",
+	"August", "September", "October", "November", "December"];
+async function buildOnThisDayFromVault(app) {
+	const adapter = app.vault.adapter;
+	if (!adapter || typeof adapter.read !== "function") return {}; // no raw-file access → no On This Day
+
+	// Pre-assembled pack wins. A vault that downloaded the On This Day pack has the
+	// finished { "MM-DD": { label, entries } } map already — use it directly rather
+	// than re-assembling from a source it doesn't have. (Ruan's own vault has the
+	// on-this-day.js source and no pack, so it falls through to the assembly below.)
+	try {
+		const packPath = normalizePath(ONTHISDAY_PACK_PATH);
+		if (await adapter.exists(packPath)) {
+			const pack = JSON.parse(await adapter.read(packPath));
+			if (pack && typeof pack === "object") return pack;
+		}
+	} catch (e) {
+		console.warn("Bible Search: On This Day pack unreadable, falling back to source —", e.message);
+	}
+
+	// Source: tools/data/on-this-day.js — a `module.exports = { … }` data module
+	// (pure literal, no code). Strip everything up to the assignment and evaluate the
+	// object literal client-side; it's the vault owner's own offline file, so a scoped
+	// Function eval is safe here. Same shape the Node builder reads.
+	let byDay = {};
+	try {
+		const srcPath = normalizePath("tools/data/on-this-day.js");
+		if (await adapter.exists(srcPath)) {
+			const src = await adapter.read(srcPath);
+			const literal = src.replace(/^[\s\S]*?module\.exports\s*=/, "").replace(/;?\s*$/, "");
+			byDay = new Function("return (" + literal + ")")() || {};
+		}
+	} catch (e) {
+		console.warn("Bible Search: could not read On This Day source —", e.message);
+	}
+
+	// Blurbs may carry [[wikilinks]] meant for the day-notes; the calendar shows them
+	// as plain text, so reduce [[Target|Alias]] → Alias, [[Target]] → Target.
+	const deWiki = (s) => (s || "").replace(/\[\[([^\]|]*\|)?([^\]]*)\]\]/g, "$2");
+	const entry = (e) => ({
+		category: e.category || "Church history",
+		title: e.title,
+		year: e.year ?? null,
+		ref: e.ref || "",
+		blurb: deWiki(e.blurb),
+		link: safeUrl(e.link),
+	});
+	const out = {};
+	for (const mmdd of Object.keys(byDay).sort()) {
+		const mo = Number(mmdd.slice(0, 2)), d = Number(mmdd.slice(3, 5));
+		if (!(mo >= 1 && mo <= 12 && d >= 1 && d <= 31)) continue;
+		const entries = (byDay[mmdd] || []).filter((e) => e && e.title).map(entry);
+		if (entries.length) out[mmdd] = { label: `${OTD_MONTHS[mo - 1]} ${d}`, entries };
+	}
+	return out;
+}
+
+/* Fetch the shareable On This Day pack and drop it in the vault. The wizard's
+ * Extras step offers this when a vault has no church-history data of its own.
+ * Validates the shape before writing so a stray 404 HTML body can't land as data;
+ * returns the number of calendar days written. */
+async function downloadOnThisDayPack(app) {
+	const res = await requestUrl({ url: ONTHISDAY_PACK_URL, throw: false });
+	const status = res.status ?? 200;
+	if (status >= 400) throw new Error(`On This Day pack not available (HTTP ${status}).`);
+	let pack;
+	try { pack = res.json ?? JSON.parse(res.text); }
+	catch { throw new Error("On This Day pack was not valid JSON."); }
+	const days = pack && typeof pack === "object" ? Object.keys(pack) : [];
+	if (!days.length || !/^\d{2}-\d{2}$/.test(days[0])) {
+		throw new Error("On This Day pack has an unexpected shape — nothing written.");
+	}
+	const packPath = normalizePath(ONTHISDAY_PACK_PATH);
+	await ensureFolder(app, packPath.split("/").slice(0, -1).join("/"));
+	await app.vault.adapter.write(packPath, JSON.stringify(pack));
+	return days.length;
+}
+
+/* Vault-API twin of the Node builder's buildChurchHistory(). The denominational
+ * family tree is one { eras, families, nodes } module — downloaded pack
+ * (Bible/church-history.json) wins, then the source module
+ * (tools/data/denominations.js), read the same scoped-eval way as On This Day.
+ * A vault with neither yields null → no `cd` payload → the tab hides. No network. */
+const chShapeOk = (d) => !!(d && Array.isArray(d.eras) && Array.isArray(d.families) &&
+	Array.isArray(d.nodes) && d.nodes.length);
+async function buildChurchHistoryFromVault(app) {
+	const adapter = app.vault.adapter;
+	if (!adapter || typeof adapter.read !== "function") return null;
+	try {
+		const packPath = normalizePath(CHURCHHISTORY_PACK_PATH);
+		if (await adapter.exists(packPath)) {
+			const pack = JSON.parse(await adapter.read(packPath));
+			if (chShapeOk(pack)) return pack;
+		}
+	} catch (e) {
+		console.warn("Bible Search: Church History pack unreadable, falling back to source —", e.message);
+	}
+	try {
+		const srcPath = normalizePath("tools/data/denominations.js");
+		if (await adapter.exists(srcPath)) {
+			const src = await adapter.read(srcPath);
+			const literal = src.replace(/^[\s\S]*?module\.exports\s*=/, "").replace(/;?\s*$/, "");
+			const tree = new Function("return (" + literal + ")")();
+			if (chShapeOk(tree)) return tree;
+		}
+	} catch (e) {
+		console.warn("Bible Search: could not read Church History source —", e.message);
+	}
+	return null;
+}
+
+/* Fetch the shareable Church History pack and drop it in the vault — the wizard's
+ * Extras step offers it when the vault has no denomination data of its own.
+ * Validates the { eras, families, nodes } shape before writing; returns the
+ * number of tree nodes written. */
+async function downloadChurchHistoryPack(app) {
+	const res = await requestUrl({ url: CHURCHHISTORY_PACK_URL, throw: false });
+	const status = res.status ?? 200;
+	if (status >= 400) throw new Error(`Church History pack not available (HTTP ${status}).`);
+	let pack;
+	try { pack = res.json ?? JSON.parse(res.text); }
+	catch { throw new Error("Church History pack was not valid JSON."); }
+	if (!chShapeOk(pack)) {
+		throw new Error("Church History pack has an unexpected shape — nothing written.");
+	}
+	const packPath = normalizePath(CHURCHHISTORY_PACK_PATH);
+	await ensureFolder(app, packPath.split("/").slice(0, -1).join("/"));
+	await app.vault.adapter.write(packPath, JSON.stringify(pack));
+	return pack.nodes.length;
+}
+
+async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 	const vault = app.vault;
 	const { translations } = surveyTranslations(app);
 	if (!translations.length) {
@@ -508,43 +738,78 @@ async function buildSearchIndex(app, htmlPath, onProgress) {
 		data[t] = rows;
 	}
 
-	// Articles: every .md under Teaching/ except READMEs and hub notes.
-	const ARTICLES = [];
+	// Content layers — each folder run through the shared collector, same as the Node
+	// builder. Teaching/ → Articles (badge = the ministry folder under Teaching/);
+	// Topics/, FAQ/ → one constant badge each; Bible History/ → sub-folder badge. A
+	// layer the user has disabled is skipped entirely (never read), yielding an empty
+	// payload → hidden tab, exactly like an absent folder.
+	const on = (k) => layerEnabled(layers, k);
 	onProgress?.("Indexing articles…");
-	for (const f of vault.getMarkdownFiles().sort((a, b) => a.path.localeCompare(b.path))) {
-		if (!f.path.startsWith("Teaching/") || /^readme$/i.test(f.basename)) continue;
-		const raw = await vault.cachedRead(f);
-		const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-		const fm = fmMatch ? fmMatch[1] : "";
-		const bodyRaw = fmMatch ? fmMatch[2] : raw;
-		if (isHub(fm)) continue;
-		const paras = toParagraphs(bodyRaw);
-		if (!paras.length) continue;
-		const source = f.path.split("/")[1] && f.path.split("/").length > 2 ? f.path.split("/")[1] : "Teaching";
-		const tagTopics = fmList(fm, "tags")
-			.map((t) => (t.startsWith("topic/") ? t.slice(6).replace(/-/g, " ") : t))
-			.filter((t) => !t.includes("/") && !/^(article|hub|devotional|teaching)$/i.test(t));
-		const topics = (fmList(fm, "topics").length ? fmList(fm, "topics") : tagTopics).slice(0, 6).join(", ");
-		ARTICLES.push([
-			fmValue(fm, "title") || firstHeading(bodyRaw) || f.basename,
-			fmValue(fm, "author"),
-			fmValue(fm, "date"),
-			topics,
-			fmValue(fm, "excerpt") || paras[0].slice(0, 240),
-			f.path.replace(/\.md$/, ""),
-			safeUrl(fmValue(fm, "source") || firstUrl(bodyRaw)),
-			paras.join("\n"),
-			source,
-		]);
-	}
+	const ARTICLES = on("articles") ? await collectNotesFromVault(app, "Teaching", (rel) => rel.split("/")[1] || "Teaching") : [];
+	onProgress?.("Indexing topics, FAQ & history…");
+	const TOPICS = on("topics") ? await collectNotesFromVault(app, "Topics", () => "Topic") : [];
+	const FAQ = on("faq") ? await collectNotesFromVault(app, "FAQ", () => "FAQ") : [];
+	const HISTORY = on("history") ? await collectNotesFromVault(app, "Bible History",
+		(rel) => { const p = rel.split("/"); return p.length > 2 ? p[1] : "History"; }) : [];
+	const ONTHISDAY = on("onthisday") ? await buildOnThisDayFromVault(app) : {};
+	const OTD_DAYS = Object.keys(ONTHISDAY).length;
+	const CHURCHHISTORY = on("churchhistory") ? await buildChurchHistoryFromVault(app) : null;
+	const CH_NODES = CHURCHHISTORY ? CHURCHHISTORY.nodes.length : 0;
 
 	// Payload emission — identical to the Node builder (see its comments for why).
+	// A content layer is emitted ONLY when it has content; an absent <script> is the
+	// signal the page uses to hide that layer's tab. The footer/lede prose is built
+	// from the same present set, so the page never advertises a layer it didn't ship.
 	onProgress?.("Building the page…");
 	const enc = (s) => s.replace(/</g, "\\u003c");
-	const dataScripts = [
-		...translations.map((t) => `<script type="application/json" id="bd-${t}">${enc(JSON.stringify(data[t]))}<\/script>`),
-		`<script type="application/json" id="ad">${enc(JSON.stringify(ARTICLES))}<\/script>`,
-	].join("\n");
+	const LAYERS = [
+		{ id: "ad", data: ARTICLES,  n: ARTICLES.length, foot: (n) => `${n} teaching articles`,             noun: "teaching articles" },
+		{ id: "td", data: TOPICS,    n: TOPICS.length,   foot: (n) => `${n} topics`,                         noun: "topics" },
+		{ id: "fd", data: FAQ,       n: FAQ.length,      foot: (n) => `${n} FAQ answers`,                    noun: "FAQ answers" },
+		{ id: "hd", data: HISTORY,   n: HISTORY.length,  foot: (n) => `${n} Bible-history notes`,            noun: "Bible history" },
+		// cd before od to match the template's tab order (Church History, then On This Day).
+		{ id: "cd", data: CHURCHHISTORY, n: CH_NODES,    foot: (n) => `a Church History family tree (${n} branches)`, noun: "a Church History family tree" },
+		{ id: "od", data: ONTHISDAY, n: OTD_DAYS,        foot: (n) => `an On This Day calendar (${n} days)`, noun: "an On This Day calendar" },
+	];
+	const presentLayers = LAYERS.filter((l) => l.n > 0);
+	const andJoin = (arr) => arr.length <= 1 ? (arr[0] || "")
+		: arr.slice(0, -1).join(", ") + " and " + arr[arr.length - 1];
+	const contentSummary = presentLayers.length ? ", plus " + andJoin(presentLayers.map((l) => l.foot(l.n))) : "";
+	const ledeLayers = presentLayers.length ? " — plus " + andJoin(presentLayers.map((l) => l.noun)) + "." : ".";
+	// Verse text goes to per-translation sidecars, not into the page — the shell
+	// stays ~2.5 MB and the view feeds translations to the page on demand (see
+	// wireBridge). Each sidecar is written only when its content changed: the
+	// text is static, so routine rebuilds stop pushing ~17 MB through iCloud
+	// sync. Sidecars for translations that left the vault are removed.
+	onProgress?.("Writing translation data…");
+	await ensureFolder(app, DATA_PATH);
+	for (const t of translations) {
+		const p = normalizePath(`${DATA_PATH}/bd-${t}.json`);
+		const json = JSON.stringify(data[t]);
+		const f = vault.getAbstractFileByPath(p);
+		if (f instanceof TFile) {
+			// adapter.read, not cachedRead — no reason to hold a 4 MB string in
+			// Obsidian's read cache just to compare it. Unreadable → rewrite.
+			let prevJson = null;
+			try { prevJson = await vault.adapter.read(p); } catch (e) { /* rewrite */ }
+			if (prevJson !== json) await vault.modify(f, json);
+		} else {
+			await vault.create(p, json);
+		}
+	}
+	const dataFolder = vault.getAbstractFileByPath(normalizePath(DATA_PATH));
+	if (dataFolder instanceof TFolder) {
+		for (const child of [...dataFolder.children]) {
+			const m = child instanceof TFile && child.name.match(/^bd-([A-Za-z0-9]+)\.json$/);
+			if (m && !translations.includes(m[1])) {
+				try { await vault.delete(child); } catch (e) { /* stale sidecar survives — harmless */ }
+			}
+		}
+	}
+
+	const dataScripts = presentLayers
+		.map((l) => `<script type="application/json" id="${l.id}">${enc(JSON.stringify(l.data))}<\/script>`)
+		.join("\n");
 
 	const STRUCT = BOOK_ORDER.map(() => ({ maxCh: 0, ch: {} }));
 	for (const t of translations) {
@@ -564,7 +829,7 @@ async function buildSearchIndex(app, htmlPath, onProgress) {
 		.join("\n");
 	const transList = translations.length === 1
 		? `the ${translations[0]} text`
-		: `${translations.length} translations — ${translations.join(", ")}`;
+		: `all ${translations.length} Bible translations in your vault`;
 
 	let html = await vault.cachedRead(templateFile);
 	html = html.replace("__DATA_SCRIPTS__", () => dataScripts)
@@ -577,7 +842,8 @@ async function buildSearchIndex(app, htmlPath, onProgress) {
 		.replace(/__TRANS_DOT__/g, () => translations.join(" · "))
 		.replace("__TRANS_HIDDEN__", () => (translations.length > 1 ? "" : " hidden"))
 		.replace("__STRUCT__", () => enc(JSON.stringify(STRUCT)))
-		.replace("__ARTCOUNT__", () => String(ARTICLES.length))
+		.replace("__LEDE_LAYERS__", () => ledeLayers)
+		.replace("__CONTENT_SUMMARY__", () => contentSummary)
 		.replace("__GENERATED__", () => new Date().toISOString().slice(0, 10));
 
 	const outPath = normalizePath(htmlPath);
@@ -588,7 +854,12 @@ async function buildSearchIndex(app, htmlPath, onProgress) {
 		await vault.create(outPath, html);
 	}
 	const verses = translations.reduce((n, t) => n + data[t].length, 0);
-	return { translations, verses, articles: ARTICLES.length, bytes: html.length };
+	return {
+		translations, verses, bytes: html.length,
+		articles: ARTICLES.length, topics: TOPICS.length,
+		faq: FAQ.length, history: HISTORY.length, onthisday: OTD_DAYS,
+		churchhistory: CH_NODES,
+	};
 }
 
 class OnboardingWizard extends Modal {
@@ -603,13 +874,18 @@ class OnboardingWizard extends Modal {
 			openNotesInNewTab: plugin.settings.openNotesInNewTab,
 			writeSetupNote: true,
 			downloads: Object.fromEntries(DOWNLOADABLE.map((d) => [d.trans, d.picked])),
+			// Which optional content layers to include — seeded from current settings
+			// (all-on for a fresh install) and adjusted in the Extras step.
+			layers: Object.fromEntries(CONTENT_LAYERS.map((l) => [l.key, layerEnabled(plugin.settings.layers, l.key)])),
 		};
+		// Snapshot to detect a layer change on a re-run (connect mode → rebuild).
+		this._initialLayers = JSON.stringify(this.data.layers);
 	}
 
 	steps() {
 		return this.mode === "connect"
-			? ["locate", "existing", "prefs", "finish"]
-			: ["locate", "status", "bibles", "prefs", "finish"];
+			? ["welcome", "locate", "existing", "extras", "prefs", "finish"]
+			: ["welcome", "locate", "status", "bibles", "extras", "prefs", "finish"];
 	}
 
 	onOpen() {
@@ -683,11 +959,28 @@ class OnboardingWizard extends Modal {
 
 	/* ── steps ─────────────────────────────────────────────── */
 
+	render_welcome(c) {
+		c.createEl("p", {
+			text:
+				"Welcome to Bible Search. This short wizard sets up a searchable Bible — every verse, " +
+				"plus topics, articles and history — as a page you can open right inside Obsidian. " +
+				"A few taps and you're ready to search.",
+		});
+		const rec = c.createEl("div", { cls: "bible-search-onb-rec" });
+		rec.createEl("strong", { text: "Tip: give Bible Search its own vault. " });
+		rec.appendText(
+			"A full Bible is ~1,200 notes per translation, and topics, articles and history add many more. " +
+			"Keeping all of it in a dedicated Obsidian vault keeps that bulk out of your personal notes, your " +
+			"graph uncluttered and sync fast — you can switch vaults anytime from Obsidian's vault menu. " +
+			"If this is that vault, carry on.");
+	}
+
 	render_locate(c) {
 		c.createEl("p", {
 			text:
-				"Bible Search hosts a single generated HTML file — the whole search interface, " +
-				"built from this vault's Bible text and articles. First, where is (or where will) that file (be)?",
+				"Bible Search hosts a generated HTML page — the search interface, built from this " +
+				"vault's Bible text and articles (the verse text itself lives beside it in " +
+				"Bible/search-data/). First, where is (or where will) that page (be)?",
 		});
 		new Setting(c)
 			.setName("Search interface file")
@@ -786,6 +1079,82 @@ class OnboardingWizard extends Modal {
 		return computePending(this.app, this.data.downloads);
 	}
 
+	// Detected presence per content layer, for the Extras step. The two folder-less
+	// layers are present when their source module OR downloaded pack is in the vault —
+	// the same files their builders read.
+	layerStatus() {
+		const v = this.app.vault;
+		const mdCount = (folder) => v.getMarkdownFiles()
+			.filter((f) => f.path.startsWith(folder + "/") && !/^readme$/i.test(f.basename)).length;
+		const packPresent = {
+			onthisday: () =>
+				!!(v.getAbstractFileByPath("tools/data/on-this-day.js") ||
+					v.getAbstractFileByPath(ONTHISDAY_PACK_PATH)),
+			churchhistory: () =>
+				!!(v.getAbstractFileByPath("tools/data/denominations.js") ||
+					v.getAbstractFileByPath(CHURCHHISTORY_PACK_PATH)),
+		};
+		const out = {};
+		for (const L of CONTENT_LAYERS) {
+			out[L.key] = L.folder ? { present: mdCount(L.folder) > 0, count: mdCount(L.folder) }
+				: { present: packPresent[L.key]() };
+		}
+		return out;
+	}
+
+	render_extras(c) {
+		c.createEl("p", {
+			text:
+				"The Bible is the core. These extra search layers are optional — include the ones you want. " +
+				"Each becomes its own tab; a layer with no content is left out automatically.",
+		});
+		const st = this.layerStatus();
+		for (const L of CONTENT_LAYERS) {
+			const { present, count } = st[L.key];
+			let desc;
+			if (L.key === "articles") {
+				desc = present
+					? `${count} notes in Teaching/.`
+					: "Add teaching notes under Teaching/ and rebuild. Articles can't be bundled — most are copyrighted.";
+			} else if (L.key === "onthisday") {
+				desc = present
+					? "Christian-year calendar data is in this vault."
+					: "Not in this vault yet — download the shareable pack (original blurbs + public data, no copyrighted text).";
+			} else if (L.key === "churchhistory") {
+				desc = present
+					? "Denomination family-tree data is in this vault."
+					: "Not in this vault yet — download the shareable pack (original blurbs + public data, no copyrighted text).";
+			} else {
+				desc = present ? `${count} notes in ${L.folder}/.` : `No notes in ${L.folder}/ yet — add some and rebuild.`;
+			}
+			const setting = new Setting(c)
+				.setName(L.label)
+				.setDesc(desc)
+				.addToggle((t) => t.setValue(this.data.layers[L.key]).onChange((v) => { this.data.layers[L.key] = v; }));
+			// The two shareable layers — offer the pack download when absent.
+			const PACKS = {
+				onthisday:     { dl: downloadOnThisDayPack,     done: (n) => `On This Day pack added — ${n} calendar days.` },
+				churchhistory: { dl: downloadChurchHistoryPack, done: (n) => `Church History pack added — ${n} branches.` },
+			};
+			if (PACKS[L.key] && !present) {
+				setting.addButton((b) => b
+					.setButtonText("Download pack")
+					.onClick(async () => {
+						b.setButtonText("Downloading…").setDisabled(true);
+						try {
+							const n = await PACKS[L.key].dl(this.app);
+							this.data.layers[L.key] = true;
+							new Notice(PACKS[L.key].done(n));
+							this.renderStep(); // re-detect: now shows as present + on
+						} catch (e) {
+							new Notice(e && e.message ? e.message : String(e), 8000);
+							b.setButtonText("Download pack").setDisabled(false);
+						}
+					}));
+			}
+		}
+	}
+
 	render_prefs(c) {
 		new Setting(c)
 			.setName("Open notes in a new tab")
@@ -803,6 +1172,8 @@ class OnboardingWizard extends Modal {
 		const ul = c.createEl("ul");
 		ul.createEl("li", { text: `Search interface file: ${this.data.htmlPath}` });
 		ul.createEl("li", { text: `Open notes in a new tab: ${this.data.openNotesInNewTab ? "yes" : "no"}` });
+		const included = CONTENT_LAYERS.filter((l) => this.data.layers[l.key]).map((l) => l.label);
+		ul.createEl("li", { text: `Extra layers: ${included.length ? included.join(", ") : "none — Bible only"}` });
 		for (const d of pending) {
 			ul.createEl("li", { text: `Download ${d.label}${d.anchor ? " — anchor translation" : ""}` });
 		}
@@ -895,13 +1266,25 @@ class OnboardingWizard extends Modal {
 		try {
 			p.settings.htmlPath = normalizePath(this.data.htmlPath);
 			p.settings.openNotesInNewTab = this.data.openNotesInNewTab;
+			p.settings.layers = { ...this.data.layers };
 			p.settings.onboarded = true;
 			await p.saveSettings();
 			if (this.mode === "connect") {
 				this.finished = true;
+				const layersChanged = JSON.stringify(this.data.layers) !== this._initialLayers;
+				const hasText = surveyTranslations(this.app).translations.length > 0;
 				this.close();
-				new Notice("Bible Search connected.");
 				p.refreshViews();
+				// A layer change only reaches the page through a rebuild. Do it now when
+				// the vault has the Bible text to build from; otherwise say so plainly.
+				if (layersChanged && hasText) {
+					new Notice("Bible Search connected — rebuilding to apply your layer choices.");
+					await p.rebuildIndex();
+				} else {
+					new Notice(layersChanged
+						? "Bible Search connected — run “Rebuild search index” to apply your layer choices."
+						: "Bible Search connected.", layersChanged ? 8000 : 4000);
+				}
 				await p.activateView();
 				return;
 			}
@@ -951,7 +1334,7 @@ class OnboardingWizard extends Modal {
 		const setStatus = (t) => { status.setText(t); };
 
 		try {
-			const { built, problems } = await runSetupPipeline(this.app, this.plugin.settings.htmlPath, pending, setStatus);
+			const { built, problems } = await runSetupPipeline(this.app, this.plugin.settings.htmlPath, pending, setStatus, this.plugin.settings.layers);
 			this.close();
 			if (problems.length) {
 				// Built, but with gaps — keep the ticket so the next launch resumes.
@@ -983,7 +1366,6 @@ class BibleSearchView extends ItemView {
 	constructor(leaf, plugin) {
 		super(leaf);
 		this.plugin = plugin;
-		this.blobUrl = null;
 		this.frame = null;
 		this.renderGen = 0; // bumped per render / on close to invalidate stale in-flight reads
 	}
@@ -1032,30 +1414,40 @@ class BibleSearchView extends ItemView {
 			return;
 		}
 
-		// readBinary, not cachedRead: the page is ~20 MB. cachedRead would UTF-8 decode
-		// it into a JS string AND hold that string in Obsidian's read cache for the rest
-		// of the session — two 20 MB copies before the iframe has parsed anything. The
-		// ArrayBuffer goes straight into the Blob; the browser decodes it once, lazily.
-		let buf;
-		try {
-			buf = await this.app.vault.readBinary(file);
-		} catch (e) {
-			// On an iCloud vault a 20 MB file can be evicted/undownloaded — surface it
-			// rather than leaving a blank pane. (Only if we're still the live render.)
-			if (gen === this.renderGen) {
-				showError("Couldn't load Bible Search", [
-					String(e && e.message ? e.message : e),
-					"The file may still be syncing from iCloud. Try again in a moment, or rebuild it.",
-				]);
+		// The page is ~20 MB. Reuse a plugin-level Blob URL keyed on the file's
+		// mtime+size, so closing/reopening the view — or a rebuild firing "modify"
+		// more than once — doesn't re-read and re-decode 20 MB from the (iCloud-
+		// backed) vault each time. Only a genuine content change (mtime/size moves)
+		// pays the read again. On mobile this is the difference between an instant
+		// reopen and a multi-second stall plus a fresh 20 MB ArrayBuffer for the GC.
+		let blobUrl = this.plugin.cachedHtmlBlobUrl(path, file.stat);
+		if (!blobUrl) {
+			// readBinary, not cachedRead: cachedRead would UTF-8 decode it into a JS
+			// string AND hold that string in Obsidian's read cache for the session —
+			// two 20 MB copies before the iframe has parsed anything. The ArrayBuffer
+			// goes straight into the Blob; the browser decodes it once, lazily.
+			let buf;
+			try {
+				buf = await this.app.vault.readBinary(file);
+			} catch (e) {
+				// On an iCloud vault a 20 MB file can be evicted/undownloaded — surface it
+				// rather than leaving a blank pane. (Only if we're still the live render.)
+				if (gen === this.renderGen) {
+					showError("Couldn't load Bible Search", [
+						String(e && e.message ? e.message : e),
+						"The file may still be syncing from iCloud. Try again in a moment, or rebuild it.",
+					]);
+				}
+				return;
 			}
-			return;
+
+			// A newer render started, or the view closed, while we were reading. Don't
+			// touch the (possibly detached) container, and don't build a Blob nobody mounts.
+			if (gen !== this.renderGen) return;
+
+			blobUrl = this.plugin.storeHtmlBlob(path, file.stat, buf);
 		}
 
-		// A newer render started, or the view closed, while we were reading. Don't
-		// touch the (possibly detached) container, and don't leak this Blob.
-		if (gen !== this.renderGen) return;
-
-		this.blobUrl = URL.createObjectURL(new Blob([buf], { type: "text/html" }));
 		const iframe = container.createEl("iframe", { cls: "bible-search-frame" });
 		iframe.addEventListener("load", () => {
 			if (gen !== this.renderGen) return; // superseded between src-set and load
@@ -1063,7 +1455,7 @@ class BibleSearchView extends ItemView {
 			this.wireBridge(iframe);
 			this.syncTheme();
 		});
-		iframe.src = this.blobUrl;
+		iframe.src = blobUrl;
 	}
 
 	// Match the app rather than the OS — inside Obsidian, Obsidian's theme is the truth.
@@ -1081,6 +1473,31 @@ class BibleSearchView extends ItemView {
 	wireBridge(iframe) {
 		const doc = iframe.contentDocument;
 		if (!doc) return;
+
+		// Split builds keep verse text in Bible/search-data/*.json; the page (a
+		// same-origin blob iframe) pulls each translation through this hook on
+		// first use. The id whitelist is strict — the page is ours, but nothing
+		// coming out of an iframe gets to name an arbitrary vault path.
+		const win = iframe.contentWindow;
+		if (win) {
+			win.bibleSearchLoadData = async (id) => {
+				if (!/^bd-[A-Za-z0-9]{1,24}$/.test(id)) throw new Error("Unknown payload: " + id);
+				const p = normalizePath(`${DATA_PATH}/${id}.json`);
+				const f = this.app.vault.getAbstractFileByPath(p);
+				if (!(f instanceof TFile)) {
+					throw new Error(`${id.slice(3)} verse data not found at "${p}" — it may still be syncing from iCloud. Run "Rebuild search index" if it never appears.`);
+				}
+				// readBinary + decode: the string is handed to the page and parsed
+				// once there — no copy lingering in Obsidian's read cache.
+				return new TextDecoder().decode(await this.app.vault.readBinary(f));
+			};
+			// Warm the default translation once the shell has settled, so the first
+			// search hits parsed data instead of waiting on a disk read.
+			setTimeout(() => {
+				try { win.bibleSearchPrefetch?.(); } catch (e) { /* page gone — fine */ }
+			}, 800);
+		}
+
 		doc.addEventListener(
 			"click",
 			(evt) => {
@@ -1112,16 +1529,15 @@ class BibleSearchView extends ItemView {
 	}
 
 	releaseBlob() {
-		if (this.blobUrl) {
-			URL.revokeObjectURL(this.blobUrl);
-			this.blobUrl = null;
-		}
+		// The Blob URL is now owned and cached by the plugin (shared across opens and
+		// across leaves), so the view no longer revokes it — closing one view must not
+		// pull the URL out from under another, nor discard the cache we reopen from.
 		this.frame = null;
 	}
 
 	async onClose() {
 		// Invalidate any render still awaiting its read, so its continuation bails
-		// instead of mounting an iframe on this detached view and leaking the Blob.
+		// instead of mounting an iframe on this detached view.
 		this.renderGen++;
 		this.releaseBlob();
 	}
@@ -1177,6 +1593,47 @@ class BibleSearchSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				})
 			);
+
+		/* ── content layers ────────────────────────────────────── */
+		new Setting(containerEl).setName("Content layers").setHeading();
+		containerEl.createEl("p", {
+			cls: "setting-item-description",
+			text:
+				"The Bible is always searchable. Turn an extra layer off to leave it out of the " +
+				"built page — its tab disappears and the file gets a little smaller. A layer with no " +
+				"content is skipped automatically. Rebuild for changes to take effect.",
+		});
+		const mdCount = (folder) => this.app.vault.getMarkdownFiles()
+			.filter((f) => f.path.startsWith(folder + "/") && !/^readme$/i.test(f.basename)).length;
+		const packPresent = {
+			onthisday: () =>
+				!!(this.app.vault.getAbstractFileByPath("tools/data/on-this-day.js") ||
+					this.app.vault.getAbstractFileByPath(ONTHISDAY_PACK_PATH)),
+			churchhistory: () =>
+				!!(this.app.vault.getAbstractFileByPath("tools/data/denominations.js") ||
+					this.app.vault.getAbstractFileByPath(CHURCHHISTORY_PACK_PATH)),
+		};
+		for (const L of CONTENT_LAYERS) {
+			const n = L.folder ? mdCount(L.folder) : 0;
+			const desc = L.folder
+				? (n ? `${n} note${n === 1 ? "" : "s"} in ${L.folder}/` : `No notes in ${L.folder}/ yet`)
+				: (packPresent[L.key]() ? `${L.label} data found in this vault` : `No ${L.label} data in this vault yet`);
+			new Setting(containerEl)
+				.setName(L.label)
+				.setDesc(desc)
+				.addToggle((t) => t
+					.setValue(layerEnabled(this.plugin.settings.layers, L.key))
+					.onChange(async (v) => {
+						this.plugin.settings.layers = { ...this.plugin.settings.layers, [L.key]: v };
+						await this.plugin.saveSettings();
+					}));
+		}
+		new Setting(containerEl)
+			.setDesc("Changes apply the next time the page is built.")
+			.addButton((b) => b
+				.setButtonText("Rebuild now")
+				.setCta()
+				.onClick(() => this.plugin.rebuildIndex()));
 
 		/* ── rebuilding ────────────────────────────────────────── */
 		new Setting(containerEl).setName("Rebuilding").setHeading();
@@ -1338,6 +1795,37 @@ class BibleSearchPlugin extends Plugin {
 		// raw setTimeout, so it's ours to cancel — otherwise a pending tick can fire
 		// against views that are already gone.
 		clearTimeout(this._refreshTimer);
+		this.releaseHtmlBlob();
+	}
+
+	// ── Shared Blob-URL cache for the generated HTML ─────────────────────────
+	// One 20 MB Blob URL, owned by the plugin and keyed on the file's mtime+size,
+	// reused by every BibleSearchView open until the file actually changes. This
+	// turns close/reopen (and a rebuild's repeated "modify" events) from a 20 MB
+	// re-read into a no-op — the single biggest repeat cost on mobile / iCloud.
+
+	// Return the cached URL when it still matches the file on disk, else null.
+	cachedHtmlBlobUrl(path, stat) {
+		const c = this._htmlBlob;
+		return c && c.path === path && c.mtime === stat.mtime && c.size === stat.size
+			? c.url
+			: null;
+	}
+
+	// Build a fresh Blob URL for `buf`, revoking any previous one, and cache it.
+	storeHtmlBlob(path, stat, buf) {
+		this.releaseHtmlBlob();
+		const url = URL.createObjectURL(new Blob([buf], { type: "text/html" }));
+		this._htmlBlob = { path, mtime: stat.mtime, size: stat.size, url };
+		return url;
+	}
+
+	// Revoke and forget the cached Blob URL (on unload, or when the file changes).
+	releaseHtmlBlob() {
+		if (this._htmlBlob) {
+			URL.revokeObjectURL(this._htmlBlob.url);
+			this._htmlBlob = null;
+		}
 	}
 
 	// Finish an interrupted wizard run. The ticket in settings.setupDownloads
@@ -1360,7 +1848,7 @@ class BibleSearchPlugin extends Plugin {
 			try {
 				const { built, problems } = await runSetupPipeline(
 					this.app, this.settings.htmlPath, pending,
-					(t) => notice.setMessage("Bible Search: " + t));
+					(t) => notice.setMessage("Bible Search: " + t), this.settings.layers);
 				notice.hide();
 				if (problems.length) {
 					new Notice(`Bible Search: still incomplete (${problems.join("; ")}) — will try again on the next launch.`, 10000);
@@ -1399,9 +1887,17 @@ class BibleSearchPlugin extends Plugin {
 				const res = await requestUrl({ url: TEMPLATE_URL });
 				await writeIfAbsent(this.app, TEMPLATE_PATH, res.text);
 			}
-			const r = await buildSearchIndex(this.app, this.settings.htmlPath, (t) => notice.setMessage(t));
+			const r = await buildSearchIndex(this.app, this.settings.htmlPath, (t) => notice.setMessage(t), this.settings.layers);
 			notice.hide();
-			new Notice(`Rebuilt "${this.settings.htmlPath}" — ${r.verses.toLocaleString()} verses, ${r.articles} articles.`, 6000);
+			const extras = [
+				r.articles && `${r.articles} articles`,
+				r.topics && `${r.topics} topics`,
+				r.faq && `${r.faq} FAQ`,
+				r.history && `${r.history} history`,
+				r.onthisday && `${r.onthisday} On This Day days`,
+				r.churchhistory && `${r.churchhistory} Church History branches`,
+			].filter(Boolean).join(", ");
+			new Notice(`Rebuilt "${this.settings.htmlPath}" — ${r.verses.toLocaleString()} verses${extras ? `, ${extras}` : ""}.`, 6000);
 		} catch (e) {
 			notice.hide();
 			new Notice("Rebuild failed: " + (e && e.message ? e.message : e), 8000);
@@ -1427,6 +1923,10 @@ class BibleSearchPlugin extends Plugin {
 		// reads and back-to-back renders.
 		clearTimeout(this._refreshTimer);
 		this._refreshTimer = setTimeout(() => {
+			// The file was rewritten — drop the cached Blob so the re-render reads the
+			// new bytes. (render() also guards on mtime/size; this frees the stale
+			// 20 MB immediately rather than waiting for the next createObjectURL.)
+			this.releaseHtmlBlob();
 			for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
 				if (leaf.view instanceof BibleSearchView) leaf.view.render();
 			}
@@ -1449,6 +1949,9 @@ module.exports.BibleSearchView = BibleSearchView;
 module.exports.__testables = {
 	BOOK_ORDER, BOOK_IDS, DOWNLOADABLE, HELLOAO_API, TEMPLATE_PATH,
 	apiVerseText, toParagraphs, fmValue, fmList, isHub, firstHeading, firstUrl, safeUrl,
+	collectNotesFromVault, buildOnThisDayFromVault, CONTENT_LAYERS, layerEnabled,
+	downloadOnThisDayPack, ONTHISDAY_PACK_PATH,
+	buildChurchHistoryFromVault, downloadChurchHistoryPack, CHURCHHISTORY_PACK_PATH,
 	surveyTranslations, buildSearchIndex, importTranslation, writeIfAbsent,
 	isTranslationComplete, fetchJson, runSetupPipeline, computePending,
 };
