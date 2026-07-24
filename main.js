@@ -209,7 +209,7 @@ const DOWNLOADABLE = [
 // one this release was audited with.
 const TEMPLATE_PATH = "Bible/bible-search-template.html";
 const TEMPLATE_URL =
-	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.2.1/Bible/bible-search-template.html";
+	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.2.2/Bible/bible-search-template.html";
 
 // The On This Day calendar is the one optional layer that CAN be shared as data —
 // its entries are original summaries of fixed-date Christian-year events, no
@@ -219,7 +219,7 @@ const TEMPLATE_URL =
 // exactly like the template. (Published in the release step; until then it 404s.)
 const ONTHISDAY_PACK_PATH = "Bible/on-this-day.json";
 const ONTHISDAY_PACK_URL =
-	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.2.1/data/on-this-day.json";
+	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.2.2/data/on-this-day.json";
 
 // Church History is the other shareable layer — the whole denominational family
 // tree ({ eras, families, nodes }) is one hand-curated, all-original module. A
@@ -228,7 +228,7 @@ const ONTHISDAY_PACK_URL =
 // until then it 404s.)
 const CHURCHHISTORY_PACK_PATH = "Bible/church-history.json";
 const CHURCHHISTORY_PACK_URL =
-	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.2.1/data/church-history.json";
+	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.2.2/data/church-history.json";
 
 // Transient 429/5xx happens over ~1,200 chapter fetches — retry with enough
 // backoff (1s/2s/4s/8s) to ride out a short outage burst instead of aborting
