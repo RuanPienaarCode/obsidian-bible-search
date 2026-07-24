@@ -1,7 +1,7 @@
 {
 	"id": "bible-search",
 	"name": "Bible Search",
-	"version": "1.1.13",
+	"version": "1.1.14",
 	"minAppVersion": "1.4.0",
 	"description": "Your own fast, private Bible study tool. Search every verse in an instant, read across translations, and keep all your data local — no account, no cloud, no tracking. Plus topics, FAQ, Bible history, an On This Day calendar and more.",
 	"author": "RuanPienaarCode",
