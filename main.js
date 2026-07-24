@@ -29,12 +29,12 @@ const DATA_PATH = "Bible/search-data";
 // default settings, and the build's gating.
 // The Bible itself is not a layer — it's always present.
 const CONTENT_LAYERS = [
-	{ key: "articles",      label: "Articles",       folder: "Teaching" },
 	{ key: "topics",        label: "Topics",         folder: "Topics" },
 	{ key: "faq",           label: "FAQ",            folder: "FAQ" },
 	{ key: "history",       label: "Bible history",  folder: "Bible History" },
 	{ key: "churchhistory", label: "Church History", folder: null },
 	{ key: "onthisday",     label: "On This Day",    folder: null },
+	{ key: "articles",      label: "Articles",       folder: "Teaching" },
 ];
 // A layer is included unless explicitly disabled — a missing/partial `layers`
 // object (older saved settings) therefore means "include everything present".
