@@ -209,7 +209,7 @@ const DOWNLOADABLE = [
 // one this release was audited with.
 const TEMPLATE_PATH = "Bible/bible-search-template.html";
 const TEMPLATE_URL =
-	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.2.2/Bible/bible-search-template.html";
+	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.2.3/Bible/bible-search-template.html";
 
 // The On This Day calendar is the one optional layer that CAN be shared as data —
 // its entries are original summaries of fixed-date Christian-year events, no
@@ -219,7 +219,7 @@ const TEMPLATE_URL =
 // exactly like the template. (Published in the release step; until then it 404s.)
 const ONTHISDAY_PACK_PATH = "Bible/on-this-day.json";
 const ONTHISDAY_PACK_URL =
-	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.2.2/data/on-this-day.json";
+	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.2.3/data/on-this-day.json";
 
 // Church History is the other shareable layer — the whole denominational family
 // tree ({ eras, families, nodes }) is one hand-curated, all-original module. A
@@ -228,7 +228,7 @@ const ONTHISDAY_PACK_URL =
 // until then it 404s.)
 const CHURCHHISTORY_PACK_PATH = "Bible/church-history.json";
 const CHURCHHISTORY_PACK_URL =
-	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.2.2/data/church-history.json";
+	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.2.3/data/church-history.json";
 
 // Transient 429/5xx happens over ~1,200 chapter fetches — retry with enough
 // backoff (1s/2s/4s/8s) to ride out a short outage burst instead of aborting
@@ -844,6 +844,9 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 		.replace("__STRUCT__", () => enc(JSON.stringify(STRUCT)))
 		.replace("__LEDE_LAYERS__", () => ledeLayers)
 		.replace("__CONTENT_SUMMARY__", () => contentSummary)
+		// The plugin always writes the split shape (verse text stays in the vault
+		// sidecars, injected by the host), so the page is never self-contained.
+		.replace("__SELF_CONTAINED__", () => "Works offline inside Obsidian — verse text loads from the vault, so this file needs the Bible Search plugin.")
 		.replace("__GENERATED__", () => new Date().toISOString().slice(0, 10));
 
 	const outPath = normalizePath(htmlPath);
@@ -1939,6 +1942,21 @@ class BibleSearchPlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+		await this.writeLayerConfig();
+	}
+
+	// Mirror the layer toggles out to tools/data/search-layers.json so the Node
+	// build pipeline (Bible/build-bible-search.js) reads the SAME config the UI
+	// sets — otherwise a CLI rebuild would silently re-enable a layer disabled
+	// here. Best-effort, and only when tools/data/ already exists (the dev
+	// pipeline is present); a plain plugin install has no tools/ folder and we
+	// never create one.
+	async writeLayerConfig() {
+		try {
+			if (!(this.app.vault.getAbstractFileByPath(normalizePath("tools/data")) instanceof TFolder)) return;
+			const cfg = Object.fromEntries(CONTENT_LAYERS.map((l) => [l.key, layerEnabled(this.settings.layers, l.key)]));
+			await this.app.vault.adapter.write(normalizePath("tools/data/search-layers.json"), JSON.stringify(cfg, null, 2) + "\n");
+		} catch (e) { /* config mirror is best-effort — never block a settings save */ }
 	}
 }
 
