@@ -1326,6 +1326,19 @@ class BibleSearchView extends ItemView {
 		this.plugin = plugin;
 		this.frame = null;
 		this.renderGen = 0; // bumped per render / on close to invalidate stale in-flight reads
+		this.fitObserver = null; // keeps the iframe filling the leaf as it resizes
+	}
+
+	/* Give the flex-column view a definite height floor taken from the leaf's own
+	 * rendered height (this.containerEl is .workspace-leaf-content, always concrete)
+	 * minus the view header. Obsidian mobile leaves .view-content auto-height, so
+	 * without this floor an iframe sized to fill collapses and only the tabs show. */
+	fitFrame() {
+		const leaf = this.containerEl;
+		if (!leaf || !this.contentEl) return;
+		const header = leaf.querySelector(":scope > .view-header");
+		const h = leaf.clientHeight - (header ? header.offsetHeight : 0);
+		if (h > 40) this.contentEl.style.minHeight = h + "px";
 	}
 
 	getViewType() {
@@ -1354,6 +1367,9 @@ class BibleSearchView extends ItemView {
 		const container = this.contentEl;
 		container.empty();
 		container.addClass("bible-search-view");
+		container.style.minHeight = ""; // recomputed by fitFrame once the frame mounts
+		this.fitObserver?.disconnect();
+		this.fitObserver = null;
 		this.releaseBlob();
 
 		const showError = (title, detail) => {
@@ -1414,6 +1430,12 @@ class BibleSearchView extends ItemView {
 			this.syncTheme();
 		});
 		iframe.src = blobUrl;
+
+		// Fill the leaf now and keep it filled as the leaf resizes — device
+		// rotation, split-pane changes, and the mobile keyboard showing/hiding.
+		this.fitFrame();
+		this.fitObserver = new ResizeObserver(() => this.fitFrame());
+		this.fitObserver.observe(this.containerEl);
 	}
 
 	// Match the app rather than the OS — inside Obsidian, Obsidian's theme is the truth.
@@ -1497,6 +1519,8 @@ class BibleSearchView extends ItemView {
 		// Invalidate any render still awaiting its read, so its continuation bails
 		// instead of mounting an iframe on this detached view.
 		this.renderGen++;
+		this.fitObserver?.disconnect();
+		this.fitObserver = null;
 		this.releaseBlob();
 	}
 }
