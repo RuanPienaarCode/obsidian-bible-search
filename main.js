@@ -559,67 +559,29 @@ async function collectNotesFromVault(app, prefix, sourceOf) {
 	return out;
 }
 
-/* Vault-API twin of the Node builder's buildOnThisDay(). Assembles the On This Day
- * payload from the downloaded pack (Bible/on-this-day.json) or, failing that, the
- * hand-curated source module (tools/data/on-this-day.js). Both are NON-markdown
- * files, so they're read through vault.adapter rather than the note API.
- * Every source is optional and every read is non-fatal — a vault without the data
- * just yields {}, which the page renders as an empty (soon hidden) tab. No network. */
-const OTD_MONTHS = ["January", "February", "March", "April", "May", "June", "July",
-	"August", "September", "October", "November", "December"];
+/* Vault-API twin of the Node builder's `od` payload. Reads the finished On This
+ * Day pack — the downloaded copy (Bible/on-this-day.json) or, in a dev or
+ * scripture-vault checkout, the generated data/on-this-day.json. Both are the
+ * assembled { "MM-DD": { label, entries } } map, so the plugin just parses JSON:
+ * no source module, no client-side code execution. The raw tools/data/on-this-day.js
+ * is compiled to that pack by the Node pipeline (build-bible-search.js /
+ * gen-onthisday-pack.js) and is never executed here. Every read is optional and
+ * non-fatal — a vault with no pack yields {}, an empty (soon hidden) tab. No network. */
 async function buildOnThisDayFromVault(app) {
 	const adapter = app.vault.adapter;
 	if (!adapter || typeof adapter.read !== "function") return {}; // no raw-file access → no On This Day
-
-	// Pre-assembled pack wins. A vault that downloaded the On This Day pack has the
-	// finished { "MM-DD": { label, entries } } map already — use it directly rather
-	// than re-assembling from a source it doesn't have. (Ruan's own vault has the
-	// on-this-day.js source and no pack, so it falls through to the assembly below.)
-	try {
-		const packPath = normalizePath(ONTHISDAY_PACK_PATH);
-		if (await adapter.exists(packPath)) {
-			const pack = JSON.parse(await adapter.read(packPath));
-			if (pack && typeof pack === "object") return pack;
+	for (const p of [ONTHISDAY_PACK_PATH, "data/on-this-day.json"]) {
+		try {
+			const packPath = normalizePath(p);
+			if (await adapter.exists(packPath)) {
+				const pack = JSON.parse(await adapter.read(packPath));
+				if (pack && typeof pack === "object") return pack;
+			}
+		} catch (e) {
+			console.warn(`Bible Search: On This Day pack unreadable at ${p} —`, e.message);
 		}
-	} catch (e) {
-		console.warn("Bible Search: On This Day pack unreadable, falling back to source —", e.message);
 	}
-
-	// Source: tools/data/on-this-day.js — a `module.exports = { … }` data module
-	// (pure literal, no code). Strip everything up to the assignment and evaluate the
-	// object literal client-side; it's the vault owner's own offline file, so a scoped
-	// Function eval is safe here. Same shape the Node builder reads.
-	let byDay = {};
-	try {
-		const srcPath = normalizePath("tools/data/on-this-day.js");
-		if (await adapter.exists(srcPath)) {
-			const src = await adapter.read(srcPath);
-			const literal = src.replace(/^[\s\S]*?module\.exports\s*=/, "").replace(/;?\s*$/, "");
-			byDay = new Function("return (" + literal + ")")() || {};
-		}
-	} catch (e) {
-		console.warn("Bible Search: could not read On This Day source —", e.message);
-	}
-
-	// Blurbs may carry [[wikilinks]] meant for the day-notes; the calendar shows them
-	// as plain text, so reduce [[Target|Alias]] → Alias, [[Target]] → Target.
-	const deWiki = (s) => (s || "").replace(/\[\[([^\]|]*\|)?([^\]]*)\]\]/g, "$2");
-	const entry = (e) => ({
-		category: e.category || "Church history",
-		title: e.title,
-		year: e.year ?? null,
-		ref: e.ref || "",
-		blurb: deWiki(e.blurb),
-		link: safeUrl(e.link),
-	});
-	const out = {};
-	for (const mmdd of Object.keys(byDay).sort()) {
-		const mo = Number(mmdd.slice(0, 2)), d = Number(mmdd.slice(3, 5));
-		if (!(mo >= 1 && mo <= 12 && d >= 1 && d <= 31)) continue;
-		const entries = (byDay[mmdd] || []).filter((e) => e && e.title).map(entry);
-		if (entries.length) out[mmdd] = { label: `${OTD_MONTHS[mo - 1]} ${d}`, entries };
-	}
-	return out;
+	return {};
 }
 
 /* Fetch the shareable On This Day pack and drop it in the vault. The wizard's
@@ -643,35 +605,28 @@ async function downloadOnThisDayPack(app) {
 	return days.length;
 }
 
-/* Vault-API twin of the Node builder's buildChurchHistory(). The denominational
- * family tree is one { eras, families, nodes } module — downloaded pack
- * (Bible/church-history.json) wins, then the source module
- * (tools/data/denominations.js), read the same scoped-eval way as On This Day.
- * A vault with neither yields null → no `cd` payload → the tab hides. No network. */
+/* Vault-API twin of the Node builder's `cd` payload. The denominational family
+ * tree is one finished { eras, families, nodes } object — the downloaded pack
+ * (Bible/church-history.json) or, in a dev or scripture-vault checkout, the
+ * generated data/church-history.json. Parsed as JSON, never executed; the raw
+ * tools/data/denominations.js is compiled to the pack by the Node pipeline
+ * (build-bible-search.js / gen-churchhistory-pack.js). A vault with neither
+ * yields null → no `cd` payload → the tab hides. No network. */
 const chShapeOk = (d) => !!(d && Array.isArray(d.eras) && Array.isArray(d.families) &&
 	Array.isArray(d.nodes) && d.nodes.length);
 async function buildChurchHistoryFromVault(app) {
 	const adapter = app.vault.adapter;
 	if (!adapter || typeof adapter.read !== "function") return null;
-	try {
-		const packPath = normalizePath(CHURCHHISTORY_PACK_PATH);
-		if (await adapter.exists(packPath)) {
-			const pack = JSON.parse(await adapter.read(packPath));
-			if (chShapeOk(pack)) return pack;
+	for (const p of [CHURCHHISTORY_PACK_PATH, "data/church-history.json"]) {
+		try {
+			const packPath = normalizePath(p);
+			if (await adapter.exists(packPath)) {
+				const pack = JSON.parse(await adapter.read(packPath));
+				if (chShapeOk(pack)) return pack;
+			}
+		} catch (e) {
+			console.warn(`Bible Search: Church History pack unreadable at ${p} —`, e.message);
 		}
-	} catch (e) {
-		console.warn("Bible Search: Church History pack unreadable, falling back to source —", e.message);
-	}
-	try {
-		const srcPath = normalizePath("tools/data/denominations.js");
-		if (await adapter.exists(srcPath)) {
-			const src = await adapter.read(srcPath);
-			const literal = src.replace(/^[\s\S]*?module\.exports\s*=/, "").replace(/;?\s*$/, "");
-			const tree = new Function("return (" + literal + ")")();
-			if (chShapeOk(tree)) return tree;
-		}
-	} catch (e) {
-		console.warn("Bible Search: could not read Church History source —", e.message);
 	}
 	return null;
 }
@@ -1973,3 +1928,5 @@ module.exports.__testables = {
 	surveyTranslations, buildSearchIndex, importTranslation, writeIfAbsent,
 	isTranslationComplete, fetchJson, runSetupPipeline, computePending,
 };
+
+/* nosourcemap */
