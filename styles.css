@@ -5,9 +5,12 @@
 	   child. On desktop that alone works — Obsidian gives .view-content a definite
 	   height. On mobile the ancestor height is NOT definite, so the flex column
 	   has nothing to fill and the iframe collapses (only the tabs show — the page
-	   auto-scrolls to the focused search box — then the app background). render()
-	   pins an inline min-height here from the leaf's real rendered height, which
-	   is always definite, giving the column a floor to fill on every platform. */
+	   auto-scrolls to the focused search box — then the app background). fitFrame()
+	   pins an inline height (and matching min-height) here from the leaf's real
+	   rendered height, which is always definite, so the column has both a floor to
+	   fill and a ceiling: an iframe taller than the pane would be clipped by the
+	   overflow:hidden below, and the page inside would lay out against a box that
+	   runs off the screen. */
 	display: flex;
 	flex-direction: column;
 	min-height: 0;
