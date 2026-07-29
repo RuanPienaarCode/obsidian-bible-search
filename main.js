@@ -52,6 +52,12 @@ const DEFAULT_SETTINGS = {
 	// unfinished. Non-null means "downloads and/or the build didn't complete" —
 	// the plugin auto-resumes on the next launch and clears it only on success.
 	setupDownloads: null,
+	// Which scripture-vault tag the on-disk search template came from, and a
+	// fingerprint of exactly what we wrote there. Together they let ensureTemplate()
+	// ship template updates to existing vaults without ever clobbering a template
+	// the user has edited themselves. Null = never fetched (or a pre-1.1.17 vault).
+	templateTag: null,
+	templateFingerprint: null,
 };
 
 const REBUILD_CMD =
@@ -178,6 +184,14 @@ const NON_TRANSLATION = new Set([
 	"Cross Reference", "Study Hubs", "Word Studies", "Places", "Catena",
 	"Commentary", "Book Intros", "Reference", "Templates", "search-data",
 ]);
+// What a translation folder may be called — kept in lock-step with
+// tools/lib/translations.js, where the reasoning is written out in full.
+// Short version: the sidecar bridge below already only accepts
+// /^bd-[A-Za-z0-9]{1,24}$/, so anything else yields verse data the page can
+// never load; and the name is interpolated into the page's HTML and into a
+// <script> body, so an unvalidated folder name is a script-injection vector.
+// Enforced here at the survey, escaped again at emission — two gates, on purpose.
+const TRANSLATION_NAME = /^[A-Za-z0-9]{1,24}$/;
 
 /* ── translation download ───────────────────────────────────────────────
  * Public-domain translations the wizard can fetch whole, from the same API
@@ -203,13 +217,21 @@ const DOWNLOADABLE = [
 		desc: "Public domain modern-English revision of the 1901 ASV.",
 	},
 ];
-// Where the search template lives in the vault, and where to fetch it from when
-// a fresh vault doesn't have it yet. Pinned to the release tag matching this
-// plugin version — never a moving branch — so the fetched page is the exact
-// one this release was audited with.
+// The scripture-vault release these URLs are pinned to. ONE constant, so the
+// template and both packs can never drift onto different tags — they used to be
+// three hand-typed strings that only happened to agree.
+// Pinned to a tag, never a moving branch, so what a fresh vault fetches is the
+// exact page this plugin release was audited with.
+const VAULT_TAG = "v1.2.7";
+const RAW = `https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/${VAULT_TAG}`;
+
+// Where the search template lives in the vault, and where to fetch it from.
+// It is NOT user content — it is this plugin's UI that happens to be a vault
+// file, so unlike notes and packs it is allowed to be replaced by a newer
+// release. ensureTemplate() below owns that lifecycle; see the note there for
+// why "write once and never look again" was a bug rather than a safety measure.
 const TEMPLATE_PATH = "Bible/bible-search-template.html";
-const TEMPLATE_URL =
-	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.2.6/Bible/bible-search-template.html";
+const TEMPLATE_URL = `${RAW}/Bible/bible-search-template.html`;
 
 // The On This Day calendar is the one optional layer that CAN be shared as data —
 // its entries are original summaries of fixed-date Christian-year events, no
@@ -218,8 +240,7 @@ const TEMPLATE_URL =
 // buildOnThisDay() emits) and drop it in. Served as a raw file at a pinned tag,
 // exactly like the template. (Published in the release step; until then it 404s.)
 const ONTHISDAY_PACK_PATH = "Bible/on-this-day.json";
-const ONTHISDAY_PACK_URL =
-	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.2.6/data/on-this-day.json";
+const ONTHISDAY_PACK_URL = `${RAW}/data/on-this-day.json`;
 
 // Church History is the other shareable layer — the whole denominational family
 // tree ({ eras, families, nodes }) is one hand-curated, all-original module. A
@@ -227,8 +248,7 @@ const ONTHISDAY_PACK_URL =
 // served the same way as the On This Day pack. (Published in the release step;
 // until then it 404s.)
 const CHURCHHISTORY_PACK_PATH = "Bible/church-history.json";
-const CHURCHHISTORY_PACK_URL =
-	"https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/v1.2.6/data/church-history.json";
+const CHURCHHISTORY_PACK_URL = `${RAW}/data/church-history.json`;
 
 // Transient 429/5xx happens over ~1,200 chapter fetches — retry with enough
 // backoff (1s/2s/4s/8s) to ride out a short outage burst instead of aborting
@@ -261,6 +281,82 @@ async function writeIfAbsent(app, path, content) {
 	if (app.vault.getAbstractFileByPath(path)) return false;
 	await ensureFolder(app, path.split("/").slice(0, -1).join("/"));
 	try { await app.vault.create(path, content); return true; } catch (e) { return false; }
+}
+
+// Cheap non-cryptographic fingerprint (FNV-1a, 32-bit). Its only job is to answer
+// "is this file still byte-for-byte what we wrote, or has the user edited it?" —
+// it is not a tamper defence and must not be used as one.
+function fingerprint(s) {
+	let h = 0x811c9dc5;
+	for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+	return (h >>> 0).toString(16);
+}
+
+/* Fetch the search template, and — the part that used to be missing — KEEP IT
+ * CURRENT. It was previously written with writeIfAbsent and then never looked at
+ * again, which quietly meant a vault onboarded at an older tag kept that template
+ * for good: every "Rebuild now" regenerated the page from a stale copy, and four
+ * consecutive releases whose only changes were template-side reached nobody.
+ *
+ * The file lives in the vault and the user is free to edit it, so this can't just
+ * clobber. We record the tag we fetched and a fingerprint of exactly what we
+ * wrote; the template is replaced only when the tag has moved AND the file still
+ * matches that fingerprint. A hand-edited template is left alone and reported.
+ *
+ * Vaults from before this shipped have no recorded fingerprint. They're adopted
+ * rather than overwritten — we can't distinguish "pristine older template" from
+ * "carefully customised one", and silently discarding the second is much worse
+ * than carrying the first for one more release.
+ *
+ * Returns one of: "written" | "updated" | "current" | "adopted" | "kept-local" | "kept-offline".
+ */
+async function ensureTemplate(app, settings, onProgress) {
+	const path = normalizePath(TEMPLATE_PATH);
+	const file = app.vault.getAbstractFileByPath(path);
+	const have = file instanceof TFile;
+
+	if (have && settings.templateTag === VAULT_TAG) return "current";
+	if (have && !settings.templateFingerprint) {
+		// Pre-fingerprint vault: adopt it as-is, and stop asking every launch.
+		settings.templateTag = VAULT_TAG;
+		settings.templateFingerprint = fingerprint(await app.vault.cachedRead(file));
+		return "adopted";
+	}
+	if (have && fingerprint(await app.vault.cachedRead(file)) !== settings.templateFingerprint) {
+		// The user has edited it. Their copy wins; don't nag again for this tag.
+		settings.templateTag = VAULT_TAG;
+		return "kept-local";
+	}
+
+	onProgress?.(have ? "Updating the search template…" : "Fetching the search template…");
+	let res;
+	try {
+		res = await requestUrl({ url: TEMPLATE_URL });
+	} catch (e) {
+		if (have) return "kept-offline";
+		throw new Error(`Couldn't fetch the search template from ${TEMPLATE_URL} — check your connection and try again.`);
+	}
+	// Validate BEFORE writing. A captive portal answers 200 with a login page;
+	// written unchecked that becomes the template forever, every placeholder
+	// substitution silently no-ops, and the "search page" is a hotel wifi form.
+	const text = typeof res.text === "string" ? res.text : "";
+	const ok = res.status >= 200 && res.status < 300 && text.includes("__DATA_SCRIPTS__");
+	if (!ok) {
+		if (have) return "kept-offline";
+		throw new Error(
+			"The search template didn't download correctly (got " + res.status + ", and the content isn't a template). " +
+			"If you're on a guest or hotel network, sign in to it first, then try again."
+		);
+	}
+
+	if (have) await app.vault.modify(file, text);
+	else {
+		await ensureFolder(app, path.split("/").slice(0, -1).join("/"));
+		await app.vault.create(path, text);
+	}
+	settings.templateTag = VAULT_TAG;
+	settings.templateFingerprint = fingerprint(text);
+	return have ? "updated" : "written";
 }
 
 /* A verse's content is a mix of plain strings, poetry parts ({text, poem}),
@@ -384,7 +480,7 @@ async function importTranslation(app, spec, onProgress) {
  * the next resume. Returns the build result plus human-readable problems;
  * an empty problems list means setup is finished and the ticket can go.
  */
-async function runSetupPipeline(app, htmlPath, pending, onProgress, layers) {
+async function runSetupPipeline(app, htmlPath, pending, onProgress, layers, settings) {
 	const problems = [];
 	for (const spec of pending) {
 		try {
@@ -395,11 +491,11 @@ async function runSetupPipeline(app, htmlPath, pending, onProgress, layers) {
 			problems.push(e && e.message ? e.message : String(e));
 		}
 	}
-	if (!(app.vault.getAbstractFileByPath(normalizePath(TEMPLATE_PATH)) instanceof TFile)) {
-		onProgress?.("Fetching the search template…");
-		const res = await requestUrl({ url: TEMPLATE_URL });
-		await writeIfAbsent(app, TEMPLATE_PATH, res.text);
-	}
+	// `settings` is how the tag/fingerprint survive the run; without it the template
+	// is still ensured, just not remembered (callers that pass nothing get the old
+	// fetch-if-missing behaviour rather than silently skipping the template).
+	const r = await ensureTemplate(app, settings || {}, onProgress);
+	if (r === "kept-local") problems.push(`Your edited ${TEMPLATE_PATH} was kept — delete it to take the ${VAULT_TAG} version.`);
 	onProgress?.("Building the search page…");
 	const built = await buildSearchIndex(app, htmlPath, onProgress, layers);
 	return { built, problems };
@@ -434,6 +530,7 @@ function surveyTranslations(app) {
 	const v = app.vault;
 	const has = (p) => !!v.getAbstractFileByPath(normalizePath(p));
 	const translations = [];
+	const rejected = [];
 	let anchor = null;
 	const bible = v.getAbstractFileByPath("Bible");
 	if (bible instanceof TFolder) {
@@ -441,6 +538,12 @@ function surveyTranslations(app) {
 			if (!(child instanceof TFolder)) continue;
 			if (NON_TRANSLATION.has(child.name) || child.name.startsWith(".")) continue;
 			if (child.children.some((g) => g instanceof TFolder && BOOKS.has(g.name))) {
+				// Looks like a translation, but the name has to be usable end-to-end
+				// (see TRANSLATION_NAME). Collected rather than dropped silently, so
+				// the caller can tell the user which folder was skipped and why —
+				// the old behaviour indexed it, then failed at load with an error
+				// that pointed at nothing the user could act on.
+				if (!TRANSLATION_NAME.test(child.name)) { rejected.push(child.name); continue; }
 				translations.push(child.name);
 			}
 		}
@@ -457,7 +560,7 @@ function surveyTranslations(app) {
 			}
 		}
 	}
-	return { translations, anchor };
+	return { translations, anchor, rejected };
 }
 
 /* A translation counts as fully downloaded only when every canonical book has
@@ -716,7 +819,15 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 	// signal the page uses to hide that layer's tab. The footer/lede prose is built
 	// from the same present set, so the page never advertises a layer it didn't ship.
 	onProgress?.("Building the page…");
+	// Two escapes, two contexts — using the wrong one is the bug, not forgetting one.
+	// enc()     — a JSON literal that lands INSIDE a <script> body. Only "<" matters:
+	//             it is what would let a value close the element early.
+	// escHtml() — a value that lands in HTML text or in a quoted attribute.
+	// Everything derived from a translation folder name goes through one of them.
 	const enc = (s) => s.replace(/</g, "\\u003c");
+	const escHtml = (s) => String(s)
+		.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 	const LAYERS = [
 		{ id: "ad", data: ARTICLES,  n: ARTICLES.length, foot: (n) => `${n} teaching articles`,             noun: "teaching articles" },
 		{ id: "td", data: TOPICS,    n: TOPICS.length,   foot: (n) => `${n} topics`,                         noun: "topics" },
@@ -777,24 +888,24 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 
 	const DEFAULT_TRANS = translations[0];
 	const transMenu = translations
-		.map((t) => `        <button role="menuitemradio" data-t="${t}" aria-checked="${t === DEFAULT_TRANS}">${t}</button>`)
+		.map((t) => `        <button role="menuitemradio" data-t="${escHtml(t)}" aria-checked="${t === DEFAULT_TRANS}">${escHtml(t)}</button>`)
 		.concat(translations.length > 1
 			? [`        <button role="menuitemradio" data-t="ALL" aria-checked="false">All ${translations.length}</button>`]
 			: [])
 		.join("\n");
 	const transList = translations.length === 1
-		? `the ${translations[0]} text`
+		? `the ${escHtml(translations[0])} text`
 		: `all ${translations.length} Bible translations in your vault`;
 
 	let html = await vault.cachedRead(templateFile);
 	html = html.replace("__DATA_SCRIPTS__", () => dataScripts)
-		.replace("__BOOKS__", () => JSON.stringify(BOOK_ORDER))
-		.replace("__TRANS__", () => JSON.stringify(translations))
-		.replace("__DEFAULT_TRANS__", () => JSON.stringify(DEFAULT_TRANS))
-		.replace("__DEFAULT_TRANS_LABEL__", () => DEFAULT_TRANS)
+		.replace("__BOOKS__", () => enc(JSON.stringify(BOOK_ORDER)))
+		.replace("__TRANS__", () => enc(JSON.stringify(translations)))
+		.replace("__DEFAULT_TRANS__", () => enc(JSON.stringify(DEFAULT_TRANS)))
+		.replace("__DEFAULT_TRANS_LABEL__", () => escHtml(DEFAULT_TRANS))
 		.replace("__TRANS_MENU__", () => transMenu)
 		.replace(/__TRANS_LIST__/g, () => transList)
-		.replace(/__TRANS_DOT__/g, () => translations.join(" · "))
+		.replace(/__TRANS_DOT__/g, () => escHtml(translations.join(" · ")))
 		.replace("__TRANS_HIDDEN__", () => (translations.length > 1 ? "" : " hidden"))
 		.replace("__STRUCT__", () => enc(JSON.stringify(STRUCT)))
 		.replace("__LEDE_LAYERS__", () => ledeLayers)
@@ -1292,7 +1403,8 @@ class OnboardingWizard extends Modal {
 		const setStatus = (t) => { status.setText(t); };
 
 		try {
-			const { built, problems } = await runSetupPipeline(this.app, this.plugin.settings.htmlPath, pending, setStatus, this.plugin.settings.layers);
+			const { built, problems } = await runSetupPipeline(this.app, this.plugin.settings.htmlPath, pending, setStatus, this.plugin.settings.layers, this.plugin.settings);
+			await this.plugin.saveSettings();   // persist the template tag/fingerprint
 			this.close();
 			if (problems.length) {
 				// Built, but with gaps — keep the ticket so the next launch resumes.
@@ -1347,7 +1459,14 @@ class BibleSearchView extends ItemView {
 		if (!leaf || !this.contentEl) return;
 		const header = leaf.querySelector(":scope > .view-header");
 		const h = leaf.clientHeight - (header ? header.offsetHeight : 0);
-		if (h > 40) {
+		// Early-out when the height hasn't actually moved. contentEl is a descendant
+		// of the observed containerEl, so writing on every tick can feed the observer
+		// its own change — converging, but enough to emit "ResizeObserver loop
+		// completed with undelivered notifications" and to do two forced layout reads
+		// plus two style writes per frame while a pane is dragged or the mobile
+		// keyboard animates.
+		if (h > 40 && h !== this._lastFitH) {
+			this._lastFitH = h;
 			this.contentEl.style.minHeight = h + "px";
 			this.contentEl.style.height = h + "px";
 		}
@@ -1362,7 +1481,7 @@ class BibleSearchView extends ItemView {
 	}
 
 	getIcon() {
-		return "book-open-text";
+		return "book-open";   // book-open-text is Lucide 0.288+ (Oct 2023); Obsidian 1.4.0 (Aug 2023) predates it and would render an empty icon
 	}
 
 	async onOpen() {
@@ -1432,7 +1551,14 @@ class BibleSearchView extends ItemView {
 			// touch the (possibly detached) container, and don't build a Blob nobody mounts.
 			if (gen !== this.renderGen) return;
 
-			blobUrl = this.plugin.storeHtmlBlob(path, file.stat, buf);
+			// Re-check the cache: another leaf may have finished its read while we
+			// were awaiting ours. Without this, two views opening together (a saved
+			// split layout, "open in new window", or refreshViews looping over every
+			// leaf) both miss, both read, and the second one's storeHtmlBlob revokes
+			// the URL the first has already assigned to its iframe but not yet
+			// fetched — leaving that pane permanently blank, past every error path.
+			blobUrl = this.plugin.cachedHtmlBlobUrl(path, file.stat)
+				|| this.plugin.storeHtmlBlob(path, file.stat, buf);
 		}
 
 		const iframe = container.createEl("iframe", { cls: "bible-search-frame" });
@@ -1485,8 +1611,11 @@ class BibleSearchView extends ItemView {
 				return new TextDecoder().decode(await this.app.vault.readBinary(f));
 			};
 			// Warm the default translation once the shell has settled, so the first
-			// search hits parsed data instead of waiting on a disk read.
-			setTimeout(() => {
+			// search hits parsed data instead of waiting on a disk read. Held so
+			// onClose can cancel it — otherwise closing the view inside 800ms leaves
+			// a timer holding the detached contentWindow and firing after teardown.
+			window.clearTimeout(this._prefetchTimer);
+			this._prefetchTimer = window.setTimeout(() => {
 				try { win.bibleSearchPrefetch?.(); } catch (e) { /* page gone — fine */ }
 			}, 800);
 		}
@@ -1534,6 +1663,8 @@ class BibleSearchView extends ItemView {
 		this.renderGen++;
 		this.fitObserver?.disconnect();
 		this.fitObserver = null;
+		window.clearTimeout(this._prefetchTimer);
+		this._prefetchTimer = null;
 		this.releaseBlob();
 	}
 }
@@ -1721,6 +1852,24 @@ class BibleSearchSettingTab extends PluginSettingTab {
 			.addButton((btn) =>
 				btn.setButtonText("Run setup wizard").onClick(() => new OnboardingWizard(this.app, this.plugin).open())
 			);
+
+		// An unfinished setup resumes on every launch — roughly 1,200 chapter fetches
+		// per translation. Without this there was no way to say "stop, I don't want
+		// that translation after all" short of re-running the wizard and unticking
+		// every download, which nobody would guess. Only shown when there's a ticket.
+		if (this.plugin.settings.setupDownloads) {
+			new Setting(containerEl)
+				.setName("Unfinished setup")
+				.setDesc("A translation download didn't finish, so it resumes each time Obsidian starts. Cancel it to stop — anything already downloaded stays in your vault.")
+				.addButton((btn) =>
+					btn.setButtonText("Cancel unfinished setup").setWarning().onClick(async () => {
+						this.plugin.settings.setupDownloads = null;
+						await this.plugin.saveSettings();
+						new Notice("Bible Search: setup cancelled. Run the wizard when you want to finish it.");
+						this.display();
+					})
+				);
+		}
 	}
 }
 
@@ -1730,7 +1879,7 @@ class BibleSearchPlugin extends Plugin {
 
 		this.registerView(VIEW_TYPE, (leaf) => new BibleSearchView(leaf, this));
 
-		this.addRibbonIcon("book-open-text", "Open Bible Search", () => this.activateView());
+		this.addRibbonIcon("book-open", "Open Bible Search", () => this.activateView());
 		this.addCommand({
 			id: "open",
 			name: "Open search",
@@ -1808,7 +1957,12 @@ class BibleSearchPlugin extends Plugin {
 	}
 
 	// Build a fresh Blob URL for `buf`, revoking any previous one, and cache it.
+	// If the cache already holds this exact file version, hand that URL back
+	// instead of revoking it — revoking a URL another leaf is mid-fetch on is how
+	// a second open pane ends up blank (see the matching note in render()).
 	storeHtmlBlob(path, stat, buf) {
+		const hit = this.cachedHtmlBlobUrl(path, stat);
+		if (hit) return hit;
 		this.releaseHtmlBlob();
 		const url = URL.createObjectURL(new Blob([buf], { type: "text/html" }));
 		this._htmlBlob = { path, mtime: stat.mtime, size: stat.size, url };
@@ -1843,10 +1997,13 @@ class BibleSearchPlugin extends Plugin {
 			try {
 				const { built, problems } = await runSetupPipeline(
 					this.app, this.settings.htmlPath, pending,
-					(t) => notice.setMessage("Bible Search: " + t), this.settings.layers);
+					(t) => notice.setMessage("Bible Search: " + t), this.settings.layers, this.settings);
+				await this.saveSettings();   // persist the template tag/fingerprint
 				notice.hide();
 				if (problems.length) {
-					new Notice(`Bible Search: still incomplete (${problems.join("; ")}) — will try again on the next launch.`, 10000);
+					// Name the escape hatch — otherwise the only signal a user gets is
+					// that this reappears every launch, with no visible way to stop it.
+					new Notice(`Bible Search: still incomplete (${problems.join("; ")}) — will try again on the next launch. To stop it: Settings → Bible Search → Cancel unfinished setup.`, 10000);
 				} else {
 					this.settings.setupDownloads = null;
 					await this.saveSettings();
@@ -1863,8 +2020,18 @@ class BibleSearchPlugin extends Plugin {
 	}
 
 	// Same anchor predicate as the wizard's detectExisting — keep the two in sync.
+	// "Is this vault already set up?" — used to skip the wizard on a vault that
+	// clearly doesn't need it. The page alone isn't enough: a split build is
+	// useless without its verse sidecars, and on a second device Obsidian Sync
+	// often lands the 2.6 MB page before the four ~4.5 MB JSON files. Adopting on
+	// the page alone marked such a vault onboarded for good, and the user's first
+	// search failed with a bridge error instead of the wizard they needed.
 	hasData() {
-		return this.app.vault.getAbstractFileByPath(normalizePath(this.settings.htmlPath)) instanceof TFile;
+		const v = this.app.vault;
+		if (!(v.getAbstractFileByPath(normalizePath(this.settings.htmlPath)) instanceof TFile)) return false;
+		const dir = v.getAbstractFileByPath(normalizePath(DATA_PATH));
+		return dir instanceof TFolder
+			&& dir.children.some((c) => c instanceof TFile && /^bd-[A-Za-z0-9]{1,24}\.json$/.test(c.name));
 	}
 
 	// In-app rebuild: same output as the Node builder, no terminal required.
@@ -1875,14 +2042,13 @@ class BibleSearchPlugin extends Plugin {
 		this._rebuilding = true;
 		const notice = new Notice("Rebuilding Bible Search…", 0);
 		try {
-			// A fresh vault (or an aborted wizard run) may not have the template yet —
-			// fetch it from the pinned release rather than failing with a dead end.
-			if (!(this.app.vault.getAbstractFileByPath(normalizePath(TEMPLATE_PATH)) instanceof TFile)) {
-				notice.setMessage("Fetching the search template…");
-				const res = await requestUrl({ url: TEMPLATE_URL });
-				await writeIfAbsent(this.app, TEMPLATE_PATH, res.text);
-			}
-			const r = await buildSearchIndex(this.app, this.settings.htmlPath, (t) => notice.setMessage(t), this.settings.layers);
+			// A fresh vault (or an aborted wizard run) may not have the template yet;
+			// an existing one may be carrying a template from an older release. Both
+			// are ensureTemplate's job — this is the path that actually delivers a
+			// template-side fix to someone who installed months ago.
+			const t = await ensureTemplate(this.app, this.settings, (m) => notice.setMessage(m));
+			if (t === "updated" || t === "adopted" || t === "written") await this.saveSettings();
+			const r = await buildSearchIndex(this.app, this.settings.htmlPath, (m) => notice.setMessage(m), this.settings.layers);
 			notice.hide();
 			const extras = [
 				r.articles && `${r.articles} articles`,
