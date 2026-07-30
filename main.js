@@ -222,7 +222,7 @@ const DOWNLOADABLE = [
 // three hand-typed strings that only happened to agree.
 // Pinned to a tag, never a moving branch, so what a fresh vault fetches is the
 // exact page this plugin release was audited with.
-const VAULT_TAG = "v1.2.7";
+const VAULT_TAG = "v1.2.8";
 const RAW = `https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/${VAULT_TAG}`;
 
 // Where the search template lives in the vault, and where to fetch it from.
@@ -578,18 +578,36 @@ function fmValue(fm, key) {
 	const m = fm.match(new RegExp("^" + key + ':\\s*"?(.*?)"?\\s*$', "m"));
 	return m ? m[1].trim() : "";
 }
+// Quote-stripping runs AFTER trim: the comma split of an inline list leaves a leading
+// space (`tags: [a, "b"]` → ` "b"`), so `^["']` never matched and the opening quote
+// survived into the payload as `"b`.
 function fmList(fm, key) {
+	const unquote = (s) => s.trim().replace(/^["']|["']$/g, "").trim();
 	const inline = fm.match(new RegExp("^" + key + ":\\s*\\[(.*)\\]\\s*$", "m"));
-	if (inline) return inline[1].split(",").map((s) => s.replace(/^["']|["']$/g, "").trim()).filter(Boolean);
+	if (inline) return inline[1].split(",").map(unquote).filter(Boolean);
 	const block = fm.match(new RegExp("^" + key + ":\\s*\\n((?:\\s*-\\s*.*\\n?)+)", "m"));
-	if (block) return block[1].split("\n").map((l) => l.replace(/^\s*-\s*/, "").replace(/^["']|["']$/g, "").trim()).filter(Boolean);
+	if (block) return block[1].split("\n").map((l) => unquote(l.replace(/^\s*-\s*/, ""))).filter(Boolean);
 	return [];
 }
+/* A [[wikilink]] survives into the payload as a link MARKER — \u0001target\u0002alias\u0003 —
+ * instead of being flattened to its alias text, so the reader can turn it back into a real
+ * anchor. Verbatim twin of build-bible-search.js; the marker format is a contract with the
+ * template's stripLinks()/noteSegments(). Anything that INDEXES or EXCERPTS a body must run
+ * it through stripLinks() first. */
+const LINK_MARK = (target, alias) => "\u0001" + target + "\u0002" + alias + "\u0003";
+const stripLinks = (s) => String(s).replace(/\u0001([^\u0001\u0002\u0003]*)\u0002([^\u0001\u0002\u0003]*)\u0003/g, "$2");
 function toParagraphs(body) {
+	// A wikilink with an empty alias ("[[Faith|]]") has no display text — drop it rather
+	// than emit a marker whose anchor would render as nothing to click.
+	const wiki = (target, alias) => {
+		const t = target.replace(/\s+/g, " ").trim(), a = alias.replace(/\s+/g, " ").trim();
+		return t && a ? LINK_MARK(t, a) : a;
+	};
 	const clean = (s) => s
 		.replace(/\[+\d+\]+\(#_?ftn[a-z0-9]*\)/gi, "")
 		.replace(/!\[\[[^\]]*\]\]/g, "")
-		.replace(/\[\[([^\]|]*\|)?([^\]]*)\]\]/g, "$2")
+		.replace(/\[\[([^\]|]+)\|([^\]]*)\]\]/g, (_, t, a) => wiki(t, a))
+		.replace(/\[\[([^\]|]+)\]\]/g, (_, t) => wiki(t, t))
 		.replace(/\[([^\]]*)\]\((?:\\.|[^)\\])*\)/g, "$1")
 		.replace(/[*_`]/g, "")
 		.replace(/\s+/g, " ").trim();
@@ -652,7 +670,9 @@ async function collectNotesFromVault(app, prefix, sourceOf) {
 			fmValue(fm, "author"),
 			fmValue(fm, "date"),
 			topics,
-			fmValue(fm, "excerpt") || paras[0].slice(0, 240),
+			// shown as plain text on result cards — the one body-derived field that must
+			// NOT carry markers (a 240-char slice could cut one in half)
+			fmValue(fm, "excerpt") || stripLinks(paras[0]).slice(0, 240),
 			rel.replace(/\.md$/, ""),
 			safeUrl(fmValue(fm, "source") || firstUrl(bodyRaw)),
 			paras.join("\n"),
@@ -2125,6 +2145,7 @@ module.exports.BibleSearchView = BibleSearchView;
 module.exports.__testables = {
 	BOOK_ORDER, BOOK_IDS, DOWNLOADABLE, HELLOAO_API, TEMPLATE_PATH,
 	apiVerseText, toParagraphs, fmValue, fmList, isHub, firstHeading, firstUrl, safeUrl,
+	LINK_MARK, stripLinks,
 	collectNotesFromVault, buildOnThisDayFromVault, CONTENT_LAYERS, layerEnabled,
 	downloadOnThisDayPack, ONTHISDAY_PACK_PATH,
 	buildChurchHistoryFromVault, downloadChurchHistoryPack, CHURCHHISTORY_PACK_PATH,
