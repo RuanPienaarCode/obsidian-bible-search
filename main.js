@@ -16,7 +16,7 @@
 
 "use strict";
 
-const { Plugin, ItemView, Modal, PluginSettingTab, Setting, Notice, TFile, TFolder, normalizePath, requestUrl } = require("obsidian");
+const { Plugin, ItemView, Modal, ConfirmationModal, PluginSettingTab, Setting, Notice, TFile, TFolder, normalizePath, requestUrl } = require("obsidian");
 
 const VIEW_TYPE = "bible-search-view";
 // Where the split build keeps each translation's verse text (bd-<TRANS>.json).
@@ -1706,49 +1706,44 @@ class BibleSearchSettingTab extends PluginSettingTab {
 		this.app.workspace.openLinkText(path, "", true);
 	}
 
-	display() {
-		const { containerEl } = this;
-		containerEl.empty();
+	/* ── value plumbing ──────────────────────────────────────────────────────
+	 * The inherited accessors read and write `this.plugin.settings[key]`
+	 * directly. Two of our controls don't fit that shape, so both hooks are
+	 * overridden rather than partially relied on:
+	 *
+	 *  - the layer toggles live nested under `settings.layers`, addressed here
+	 *    through a "layer:<key>" pseudo-key;
+	 *  - htmlPath has to be normalized on the way in (the modify-event filter
+	 *    compares against file.path, which is always normalized) and then
+	 *    carried into any open view. */
+	getControlValue(key) {
+		if (key.startsWith("layer:")) return layerEnabled(this.plugin.settings.layers, key.slice(6));
+		return this.plugin.settings[key];
+	}
 
-		/* ── interface ─────────────────────────────────────────── */
-		new Setting(containerEl).setName("Interface").setHeading();
+	async setControlValue(key, value) {
+		if (key.startsWith("layer:")) {
+			this.plugin.settings.layers = { ...this.plugin.settings.layers, [key.slice(6)]: !!value };
+		} else if (key === "htmlPath") {
+			this.plugin.settings.htmlPath = normalizePath(String(value).trim() || DEFAULT_SETTINGS.htmlPath);
+		} else {
+			this.plugin.settings[key] = value;
+		}
+		await this.plugin.saveSettings();
+		if (key === "htmlPath") this.plugin.refreshViews(); // already debounced
+	}
 
-		new Setting(containerEl)
-			.setName("Search interface file")
-			.setDesc("Vault path to the generated Bible Search HTML.")
-			.addText((text) =>
-				text
-					.setPlaceholder(DEFAULT_SETTINGS.htmlPath)
-					.setValue(this.plugin.settings.htmlPath)
-					.onChange(async (value) => {
-						const raw = value.trim() || DEFAULT_SETTINGS.htmlPath;
-						// Normalize so the stored path matches what the modify-event filter
-						// compares against (file.path is always normalized).
-						this.plugin.settings.htmlPath = normalizePath(raw);
-						await this.plugin.saveSettings();
-						this.plugin.refreshViews(); // already debounced
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Open notes in a new tab")
-			.setDesc("Keep the search tab in place when a verse or article link is clicked.")
-			.addToggle((toggle) =>
-				toggle.setValue(this.plugin.settings.openNotesInNewTab).onChange(async (value) => {
-					this.plugin.settings.openNotesInNewTab = value;
-					await this.plugin.saveSettings();
-				})
-			);
-
-		/* ── content layers ────────────────────────────────────── */
-		new Setting(containerEl).setName("Content layers").setHeading();
-		containerEl.createEl("p", {
-			cls: "setting-item-description",
-			text:
-				"The Bible is always searchable. Turn an extra layer off to leave it out of the " +
-				"built page — its tab disappears and the file gets a little smaller. A layer with no " +
-				"content is skipped automatically. Rebuild for changes to take effect.",
-		});
+	/* Declarative settings (Obsidian 1.13+). Returning definitions instead of
+	 * building the DOM is what puts every row into the global settings search —
+	 * `name`, `desc` and `aliases` are the indexed fields, so the prose blocks
+	 * that used to be bare <p> elements are now real rows and searchable too.
+	 *
+	 * Re-run on every render, so the vault-derived counts and the found/missing
+	 * status below are recomputed rather than frozen at load. Rows whose
+	 * visibility depends on plugin state use the `visible` callback form so
+	 * this.update() can re-evaluate them without a full settings reopen. */
+	getSettingDefinitions() {
+		const has = (p) => !!this.app.vault.getAbstractFileByPath(p);
 		const mdCount = (folder) => this.app.vault.getMarkdownFiles()
 			.filter((f) => f.path.startsWith(folder + "/") && !/^readme$/i.test(f.basename)).length;
 		const packPresent = {
@@ -1759,137 +1754,232 @@ class BibleSearchSettingTab extends PluginSettingTab {
 				!!(this.app.vault.getAbstractFileByPath("tools/data/denominations.js") ||
 					this.app.vault.getAbstractFileByPath(CHURCHHISTORY_PACK_PATH)),
 		};
-		for (const L of CONTENT_LAYERS) {
+		const layerDesc = (L) => {
 			const n = L.folder ? mdCount(L.folder) : 0;
-			const desc = L.folder
+			return L.folder
 				? (n ? `${n} note${n === 1 ? "" : "s"} in ${L.folder}/` : `No notes in ${L.folder}/ yet`)
 				: (packPresent[L.key]() ? `${L.label} data found in this vault` : `No ${L.label} data in this vault yet`);
-			new Setting(containerEl)
-				.setName(L.label)
-				.setDesc(desc)
-				.addToggle((t) => t
-					.setValue(layerEnabled(this.plugin.settings.layers, L.key))
-					.onChange(async (v) => {
-						this.plugin.settings.layers = { ...this.plugin.settings.layers, [L.key]: v };
-						await this.plugin.saveSettings();
-					}));
-		}
-		new Setting(containerEl)
-			.setDesc("Changes apply the next time the page is built.")
-			.addButton((b) => b
-				.setButtonText("Rebuild now")
-				.setCta()
-				.onClick(() => this.plugin.rebuildIndex()));
+		};
+		// Braces, not a concise arrow: a `render` callback may return a cleanup
+		// function, so it must not accidentally return the Setting that
+		// addButton() hands back.
+		const rebuildButton = (setting) => {
+			setting.addButton((b) => b.setButtonText("Rebuild now").setCta().onClick(() => this.plugin.rebuildIndex()));
+		};
+		// A row rendered as a full-width block (a <pre> or a <details>) rather
+		// than the usual info/control split.
+		const blockRow = (setting, build) => {
+			const el = setting.settingEl;
+			el.empty();
+			el.addClass("bible-search-block-row");
+			build(el);
+		};
 
-		/* ── rebuilding ────────────────────────────────────────── */
-		new Setting(containerEl).setName("Rebuilding").setHeading();
-
-		const status = this.app.vault.getAbstractFileByPath(this.plugin.settings.htmlPath)
-			? `Found — this tab reloads itself whenever the file is rebuilt.`
+		const hasBuilder = has("Bible/build-bible-search.js");
+		const docs = DOCS.filter((doc) => has(doc.path));
+		const status = has(this.plugin.settings.htmlPath)
+			? "Found — this tab reloads itself whenever the file is rebuilt."
 			: `Missing at "${this.plugin.settings.htmlPath}" — build it, or correct the path above.`;
 
-		new Setting(containerEl)
-			.setName("Rebuild the search index")
-			.setDesc(
-				`The interface is generated from the vault: Bible full text plus every article under Teaching/. ` +
-					`Rebuild after adding or editing content. ${status}`
-			)
-			.addButton((btn) =>
-				btn
-					.setButtonText("Rebuild now")
-					.setCta()
-					.onClick(() => this.plugin.rebuildIndex())
-			);
+		return [
+			{
+				type: "group",
+				heading: "Interface",
+				items: [
+					{
+						name: "Search interface file",
+						desc: "Vault path to the generated Bible Search HTML.",
+						aliases: ["html", "path", "file", "interface"],
+						control: {
+							type: "text",
+							key: "htmlPath",
+							placeholder: DEFAULT_SETTINGS.htmlPath,
+							defaultValue: DEFAULT_SETTINGS.htmlPath,
+						},
+					},
+					{
+						name: "Open notes in a new tab",
+						desc: "Keep the search tab in place when a verse or article link is clicked.",
+						aliases: ["tab", "link", "verse"],
+						control: {
+							type: "toggle",
+							key: "openNotesInNewTab",
+							defaultValue: DEFAULT_SETTINGS.openNotesInNewTab,
+						},
+					},
+				],
+			},
+			{
+				type: "group",
+				heading: "Content layers",
+				items: [
+					{
+						name: "How content layers work",
+						desc:
+							"The Bible is always searchable. Turn an extra layer off to leave it out of the " +
+							"built page — its tab disappears and the file gets a little smaller. A layer with no " +
+							"content is skipped automatically. Rebuild for changes to take effect.",
+					},
+					...CONTENT_LAYERS.map((L) => ({
+						name: L.label,
+						desc: layerDesc(L),
+						aliases: ["layer", "content"],
+						control: { type: "toggle", key: `layer:${L.key}`, defaultValue: true },
+					})),
+					{
+						name: "Apply layer changes",
+						desc: "Changes apply the next time the page is built.",
+						aliases: ["rebuild"],
+						render: rebuildButton,
+					},
+				],
+			},
+			{
+				type: "group",
+				heading: "Rebuilding",
+				items: [
+					{
+						name: "Rebuild the search index",
+						desc:
+							"The interface is generated from the vault: Bible full text plus every article under Teaching/. " +
+							`Rebuild after adding or editing content. ${status}`,
+						aliases: ["rebuild", "index", "generate"],
+						render: rebuildButton,
+					},
+					// The terminal path is only advertised when the Node builder actually
+					// ships in this vault — a slim clone (enrichment kit parked) skips it.
+					{
+						name: "Rebuild from the terminal instead",
+						desc:
+							"The Node builder produces the same page." +
+							(has("tools/gen-hubs.js")
+								? " It pairs with the enrichment generators (cross-references, hubs, commentary)."
+								: "") +
+							" Run from the vault root.",
+						aliases: ["terminal", "node", "cli", "command"],
+						visible: () => hasBuilder,
+						render: (setting) => {
+							setting.addButton((btn) =>
+								btn.setButtonText("Copy command").onClick(async () => {
+									// navigator.clipboard can be missing/blocked in WKWebView (Obsidian iOS).
+									try {
+										await navigator.clipboard.writeText(REBUILD_CMD);
+										new Notice("Rebuild command copied");
+									} catch (e) {
+										new Notice("Couldn't access the clipboard — select the command below and copy it.");
+									}
+								})
+							);
+						},
+					},
+					{
+						name: "Rebuild command",
+						searchable: false,
+						visible: () => hasBuilder,
+						render: (setting) => {
+							blockRow(setting, (el) => el.createEl("pre", { cls: "bible-search-cmd", text: REBUILD_CMD }));
+						},
+					},
+				],
+			},
+			// Only the docs this vault actually has — nothing advertised as "(missing)".
+			{
+				type: "group",
+				heading: "Documentation",
+				visible: () => docs.length > 0,
+				items: [
+					{
+						name: "How folder documentation works",
+						desc:
+							"Each folder documents the shape its content must take. Get the shape right and the " +
+							"content is picked up on the next rebuild — no configuration here.",
+					},
+					...docs.map((doc) => ({
+						name: doc.name,
+						desc: doc.desc,
+						aliases: ["docs", "documentation"],
+						render: (setting) => {
+							setting.addButton((btn) => btn.setButtonText(doc.path).onClick(() => this.openDoc(doc.path)));
+						},
+					})),
+				],
+			},
+			{
+				type: "group",
+				heading: "Quick reference",
+				items: QUICK_REF.map((ref) => ({
+					name: ref.title,
+					aliases: ["reference", "syntax", "cheatsheet"],
+					render: (setting) => {
+						blockRow(setting, (el) => {
+							const details = el.createEl("details", { cls: "bible-search-ref" });
+							details.createEl("summary", { text: ref.title });
+							details.createEl("pre", { text: ref.body });
+						});
+					},
+				})),
+			},
+			{
+				type: "group",
+				heading: "Setup",
+				items: [
+					{
+						name: "Setup wizard",
+						desc: "Re-run the first-run wizard — locate the search file (or plan the build on a fresh vault) and set preferences.",
+						aliases: ["wizard", "onboarding", "first run"],
+						render: (setting) => {
+							setting.addButton((btn) =>
+								btn.setButtonText("Run setup wizard").onClick(() => new OnboardingWizard(this.app, this.plugin).open())
+							);
+						},
+					},
+					// An unfinished setup resumes on every launch — roughly 1,200 chapter
+					// fetches per translation. Without this there was no way to say "stop,
+					// I don't want that translation after all" short of re-running the
+					// wizard and unticking every download, which nobody would guess.
+					{
+						name: "Unfinished setup",
+						desc: "A translation download didn't finish, so it resumes each time Obsidian starts. Cancel it to stop — anything already downloaded stays in your vault.",
+						aliases: ["cancel", "resume", "download"],
+						visible: () => !!this.plugin.settings.setupDownloads,
+						render: (setting) => {
+							setting.addButton((btn) =>
+								btn
+									.setButtonText("Cancel unfinished setup")
+									.setDestructive()
+									.onClick(() => this.confirmCancelSetup())
+							);
+						},
+					},
+				],
+			},
+		];
+	}
 
-		// The terminal path is only advertised when the Node builder actually ships
-		// in this vault — a slim clone (enrichment kit parked) skips it entirely.
-		const has = (p) => !!this.app.vault.getAbstractFileByPath(p);
-		if (has("Bible/build-bible-search.js")) {
-			const rebuild = new Setting(containerEl)
-				.setName("Rebuild from the terminal instead")
-				.setDesc(
-					"The Node builder produces the same page." +
-						(has("tools/gen-hubs.js")
-							? " It pairs with the enrichment generators (cross-references, hubs, commentary)."
-							: "") +
-						" Run from the vault root."
-				);
-			rebuild.addButton((btn) =>
-				btn
-					.setButtonText("Copy command")
-					.onClick(async () => {
-						// navigator.clipboard can be missing/blocked in WKWebView (Obsidian iOS).
-						try {
-							await navigator.clipboard.writeText(REBUILD_CMD);
-							new Notice("Rebuild command copied");
-						} catch (e) {
-							new Notice("Couldn't access the clipboard — select the command below and copy it.");
-						}
-					})
-			);
-			containerEl.createEl("pre", { cls: "bible-search-cmd", text: REBUILD_CMD });
-		}
-
-		/* ── documentation ─────────────────────────────────────── */
-		// Only the docs this vault actually has — nothing advertised as "(missing)".
-		const docs = DOCS.filter((doc) => has(doc.path));
-		if (docs.length) {
-			new Setting(containerEl).setName("Documentation").setHeading();
-			containerEl.createEl("p", {
-				cls: "setting-item-description bible-search-doclead",
-				text:
-					"Each folder documents the shape its content must take. Get the shape right and the " +
-					"content is picked up on the next rebuild — no configuration here.",
-			});
-
-			for (const doc of docs) {
-				new Setting(containerEl)
-					.setName(doc.name)
-					.setDesc(doc.desc)
-					.addButton((btn) =>
-						btn
-							.setButtonText(doc.path)
-							.onClick(() => this.openDoc(doc.path))
-					);
-			}
-		}
-
-		/* ── quick reference ───────────────────────────────────── */
-		new Setting(containerEl).setName("Quick reference").setHeading();
-
-		for (const ref of QUICK_REF) {
-			const details = containerEl.createEl("details", { cls: "bible-search-ref" });
-			details.createEl("summary", { text: ref.title });
-			details.createEl("pre", { text: ref.body });
-		}
-
-		/* ── setup ─────────────────────────────────────────────── */
-		new Setting(containerEl).setName("Setup").setHeading();
-
-		new Setting(containerEl)
-			.setName("Setup wizard")
-			.setDesc("Re-run the first-run wizard — locate the search file (or plan the build on a fresh vault) and set preferences.")
-			.addButton((btn) =>
-				btn.setButtonText("Run setup wizard").onClick(() => new OnboardingWizard(this.app, this.plugin).open())
-			);
-
-		// An unfinished setup resumes on every launch — roughly 1,200 chapter fetches
-		// per translation. Without this there was no way to say "stop, I don't want
-		// that translation after all" short of re-running the wizard and unticking
-		// every download, which nobody would guess. Only shown when there's a ticket.
-		if (this.plugin.settings.setupDownloads) {
-			new Setting(containerEl)
-				.setName("Unfinished setup")
-				.setDesc("A translation download didn't finish, so it resumes each time Obsidian starts. Cancel it to stop — anything already downloaded stays in your vault.")
-				.addButton((btn) =>
-					btn.setButtonText("Cancel unfinished setup").setWarning().onClick(async () => {
-						this.plugin.settings.setupDownloads = null;
-						await this.plugin.saveSettings();
-						new Notice("Bible Search: setup cancelled. Run the wizard when you want to finish it.");
-						this.display();
-					})
-				);
-		}
+	// Cancelling throws away the resume ticket for good — the only record of
+	// which translations were still owed — so it asks first rather than firing
+	// off the back of a single click.
+	confirmCancelSetup() {
+		const modal = new ConfirmationModal(this.app);
+		modal.setTitle("Cancel unfinished setup?");
+		modal.setContent(
+			"The remaining downloads won't be resumed. Anything already downloaded stays in your vault, " +
+			"and you can finish the rest at any time by running the setup wizard again."
+		);
+		modal.addCancelButton("Keep it");
+		modal.addButton((btn) =>
+			btn
+				.setButtonText("Cancel setup")
+				.setDestructive()
+				.setCta()
+				.onClick(async () => {
+					this.plugin.settings.setupDownloads = null;
+					await this.plugin.saveSettings();
+					new Notice("Bible Search: setup cancelled. Run the wizard when you want to finish it.");
+					this.update(); // re-evaluates `visible`, dropping the row
+				})
+		);
+		modal.open();
 	}
 }
 
@@ -2090,12 +2180,15 @@ class BibleSearchPlugin extends Plugin {
 	async activateView() {
 		const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE);
 		if (existing.length > 0) {
-			this.app.workspace.revealLeaf(existing[0]);
+			// revealLeaf is async (it loads a deferred leaf before revealing it) —
+			// awaited so the view is actually live when this resolves, and so a
+			// rejection surfaces here instead of as an unhandled promise.
+			await this.app.workspace.revealLeaf(existing[0]);
 			return;
 		}
 		const leaf = this.app.workspace.getLeaf(true);
 		await leaf.setViewState({ type: VIEW_TYPE, active: true });
-		this.app.workspace.revealLeaf(leaf);
+		await this.app.workspace.revealLeaf(leaf);
 	}
 
 	refreshViews() {
@@ -2142,6 +2235,7 @@ module.exports = BibleSearchPlugin;
 // For the node smoke test only — Obsidian ignores extra properties.
 module.exports.OnboardingWizard = OnboardingWizard;
 module.exports.BibleSearchView = BibleSearchView;
+module.exports.BibleSearchSettingTab = BibleSearchSettingTab;
 module.exports.__testables = {
 	BOOK_ORDER, BOOK_IDS, DOWNLOADABLE, HELLOAO_API, TEMPLATE_PATH,
 	apiVerseText, toParagraphs, fmValue, fmList, isHub, firstHeading, firstUrl, safeUrl,

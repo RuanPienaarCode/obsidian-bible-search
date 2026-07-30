@@ -25,6 +25,17 @@
 }
 
 /* settings — rebuild command + quick reference */
+
+/* A declarative setting row whose render() replaced the usual info/control
+   split with one full-width block (the rebuild <pre>, a quick-reference
+   <details>). The default row is a flex line with a border; both are wrong for
+   a block, so reset them here rather than fighting the row from inside. */
+.bible-search-block-row.setting-item {
+	display: block;
+	padding: 0.4em 0 0;
+	border-top: none;
+}
+
 .bible-search-doclead {
 	margin: 0 0 1em;
 }

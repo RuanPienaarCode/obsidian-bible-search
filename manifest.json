@@ -1,8 +1,8 @@
 {
 	"id": "bible-search",
 	"name": "Bible Search",
-	"version": "1.1.24",
-	"minAppVersion": "1.4.0",
+	"version": "1.1.25",
+	"minAppVersion": "1.13.0",
 	"description": "Search every verse of the Bible instantly from a pane, read across translations, and keep all your data local. No account, no cloud, no tracking. Includes topics, FAQ, Bible history, a Church History tree and an On This Day calendar.",
 	"author": "RuanPienaarCode",
 	"authorUrl": "https://github.com/RuanPienaarCode",
