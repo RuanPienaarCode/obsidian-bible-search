@@ -25,6 +25,7 @@ const VIEW_TYPE = "bible-search-view";
 const DATA_PATH = "Bible/search-data";
 /* Which payload ids the page is allowed to ask the vault for.
      bd-<TRANS>   verse text, one per translation
+     lex          the Strong's dictionary behind the Words tab
      xr           cross-references for the whole Bible
      bx           book context (author, date, theme, outline) for all 66 books
      il-<0–65>    Hebrew/Greek word-by-word tagged text, per book
@@ -37,9 +38,10 @@ const DATA_PATH = "Bible/search-data";
    path, and the page is a same-origin iframe. Ours or not, nothing coming out of
    an iframe gets to name an arbitrary file. Book numbers are bounded to 0–65
    rather than \d+ so "il-999" is refused at the gate, not at the file lookup. */
-const PAYLOAD_ID = /^(?:bd-[A-Za-z0-9]{1,24}|xr|bx|(?:il|cm)-(?:[0-9]|[1-5][0-9]|6[0-5]))$/;
+const PAYLOAD_ID = /^(?:bd-[A-Za-z0-9]{1,24}|lex|xr|bx|(?:il|cm)-(?:[0-9]|[1-5][0-9]|6[0-5]))$/;
 const payloadLabel = (id) =>
 	id.startsWith("bd-") ? `${id.slice(3)} verse data`
+	: id === "lex" ? "Dictionary"
 	: id === "xr" ? "Cross-reference data"
 	: id === "bx" ? "Book context data"
 	: id.startsWith("il-") ? "Hebrew/Greek data"
@@ -50,6 +52,7 @@ const payloadLabel = (id) =>
 // default settings, and the build's gating.
 // The Bible itself is not a layer — it's always present.
 const CONTENT_LAYERS = [
+	{ key: "words",         label: "Words",          folder: "Bible/Word Studies" },
 	{ key: "topics",        label: "Topics",         folder: "Topics" },
 	{ key: "faq",           label: "FAQ",            folder: "FAQ" },
 	{ key: "history",       label: "Bible history",  folder: "Bible History" },
@@ -740,6 +743,29 @@ async function buildOnThisDayFromVault(app) {
 	return {};
 }
 
+/* Vault-API twin of the Node builder's `lx` payload. The Words tab's dictionary
+ * is Bible/search-data/lex.json — ~3 MB of static, public-domain Strong's data
+ * generated once by tools/gen-lexicon.js. Nothing about it depends on this vault,
+ * so no builder ever rebuilds it; this only reads the counts beside it and
+ * confirms the sidecar is really there. Both files or nothing: meta alone would
+ * advertise a dictionary the page then fails to load. A vault with neither yields
+ * null → no `lx` payload → the tab hides. No network, no code execution. */
+async function readLexiconMeta(app) {
+	const adapter = app.vault.adapter;
+	if (!adapter || typeof adapter.read !== "function") return null;
+	try {
+		const metaPath = normalizePath(`${DATA_PATH}/lex-meta.json`);
+		if (!(await adapter.exists(metaPath))) return null;
+		if (!(await adapter.exists(normalizePath(`${DATA_PATH}/lex.json`)))) return null;
+		const meta = JSON.parse(await adapter.read(metaPath));
+		if (!meta || !meta.n) return null;
+		return { n: meta.n, hebrew: meta.hebrew, greek: meta.greek };
+	} catch (e) {
+		console.warn("Bible Search: lexicon meta unreadable —", e.message);
+		return null;
+	}
+}
+
 /* Fetch the shareable On This Day pack and drop it in the vault. The wizard's
  * Extras step offers this when a vault has no church-history data of its own.
  * Validates the shape before writing so a stray 404 HTML body can't land as data;
@@ -906,6 +932,16 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 		(rel) => { const p = rel.split("/"); return p.length > 2 ? p[1] : "Prayer"; }) : [];
 	const HISTORY = on("history") ? await collectNotesFromVault(app, "Bible History",
 		(rel) => { const p = rel.split("/"); return p.length > 2 ? p[1] : "History"; }) : [];
+	const WORDS = on("words") ? await collectNotesFromVault(app, "Bible/Word Studies",
+		(rel) => (/\/G\d/.test(rel) ? "Greek" : "Hebrew")) : [];
+	// The dictionary behind the Words tab is Bible/search-data/lex.json — ~3 MB of
+	// static public-domain lexicon generated once by tools/gen-lexicon.js, NOT built
+	// here (nothing about it depends on this vault). This build only reads its counts
+	// module and confirms the sidecar is on disk; that pair is what tells the page to
+	// show the tab. Meta without the sidecar would advertise a dictionary the page
+	// then fails to load, so both must be present or the layer stays off.
+	const LEXICON = on("words") ? await readLexiconMeta(app) : null;
+	const LEX_N = LEXICON ? LEXICON.n : 0;
 	const ONTHISDAY = on("onthisday") ? await buildOnThisDayFromVault(app) : {};
 	const OTD_DAYS = Object.keys(ONTHISDAY).length;
 	const CHURCHHISTORY = on("churchhistory") ? await buildChurchHistoryFromVault(app) : null;
@@ -926,6 +962,12 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 		.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 		.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 	const LAYERS = [
+		// Words ships as two payloads: "lx" (the dictionary's counts — its presence
+		// shows the tab, since the dictionary is the lex.json sidecar) and "wd" (the
+		// written studies, optional — a vault with no Word Studies folder still gets
+		// the full dictionary). Only "lx" speaks in the footer prose.
+		{ id: "lx", data: LEXICON,   n: LEX_N,           foot: (n) => `a Hebrew and Greek dictionary (${n.toLocaleString()} words)`, noun: "a Hebrew and Greek dictionary" },
+		{ id: "wd", data: WORDS,     n: WORDS.length,    foot: () => "",                                    noun: "" },
 		{ id: "ad", data: ARTICLES,  n: ARTICLES.length, foot: (n) => `${n} teaching articles`,             noun: "teaching articles" },
 		{ id: "td", data: TOPICS,    n: TOPICS.length,   foot: (n) => `${n} topics`,                         noun: "topics" },
 		{ id: "fd", data: FAQ,       n: FAQ.length,      foot: (n) => `${n} FAQ answers`,                    noun: "FAQ answers" },
@@ -938,8 +980,12 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 	const presentLayers = LAYERS.filter((l) => l.n > 0);
 	const andJoin = (arr) => arr.length <= 1 ? (arr[0] || "")
 		: arr.slice(0, -1).join(", ") + " and " + arr[arr.length - 1];
-	const contentSummary = presentLayers.length ? ", plus " + andJoin(presentLayers.map((l) => l.foot(l.n))) : "";
-	const ledeLayers = presentLayers.length ? " — plus " + andJoin(presentLayers.map((l) => l.noun)) + "." : ".";
+	// A layer may ship a payload and still say nothing in the prose — the written
+	// word studies belong to the Words tab the dictionary already announced. Blank
+	// noun = emitted but not advertised; unfiltered it lands as a stray ", ,".
+	const spokenLayers = presentLayers.filter((l) => l.noun);
+	const contentSummary = spokenLayers.length ? ", plus " + andJoin(spokenLayers.map((l) => l.foot(l.n))) : "";
+	const ledeLayers = spokenLayers.length ? " — plus " + andJoin(spokenLayers.map((l) => l.noun)) + "." : ".";
 	// Verse text goes to per-translation sidecars, not into the page — the shell
 	// stays ~2.5 MB and the view feeds translations to the page on demand (see
 	// wireBridge). Each sidecar is written only when its content changed: the
@@ -2445,5 +2491,7 @@ module.exports.__testables = {
 	surveyTranslations, buildSearchIndex, importTranslation, writeIfAbsent,
 	isTranslationComplete, fetchJson, runSetupPipeline, computePending,
 };
+
+/* nosourcemap */
 
 /* nosourcemap */
