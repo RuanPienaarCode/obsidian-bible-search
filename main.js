@@ -31,10 +31,10 @@ const DATA_PATH = "Bible/search-data";
 const CONTENT_LAYERS = [
 	{ key: "topics",        label: "Topics",         folder: "Topics" },
 	{ key: "faq",           label: "FAQ",            folder: "FAQ" },
-	{ key: "prayers",       label: "Prayers",        folder: "Prayers" },
 	{ key: "history",       label: "Bible history",  folder: "Bible History" },
 	{ key: "churchhistory", label: "Church History", folder: null },
 	{ key: "onthisday",     label: "On This Day",    folder: null },
+	{ key: "prayers",       label: "Prayers",        folder: "Prayers" },
 	{ key: "articles",      label: "Articles",       folder: "Teaching" },
 ];
 // A layer is included unless explicitly disabled — a missing/partial `layers`
@@ -223,7 +223,7 @@ const DOWNLOADABLE = [
 // three hand-typed strings that only happened to agree.
 // Pinned to a tag, never a moving branch, so what a fresh vault fetches is the
 // exact page this plugin release was audited with.
-const VAULT_TAG = "v1.2.18";
+const VAULT_TAG = "v1.2.20";
 const RAW = `https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/${VAULT_TAG}`;
 
 // Where the search template lives in the vault, and where to fetch it from.
@@ -908,11 +908,11 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 		{ id: "ad", data: ARTICLES,  n: ARTICLES.length, foot: (n) => `${n} teaching articles`,             noun: "teaching articles" },
 		{ id: "td", data: TOPICS,    n: TOPICS.length,   foot: (n) => `${n} topics`,                         noun: "topics" },
 		{ id: "fd", data: FAQ,       n: FAQ.length,      foot: (n) => `${n} FAQ answers`,                    noun: "FAQ answers" },
-		{ id: "pd", data: PRAYERS,   n: PRAYERS.length,  foot: (n) => `${n} prayers`,                        noun: "prayers" },
 		{ id: "hd", data: HISTORY,   n: HISTORY.length,  foot: (n) => `${n} Bible-history notes`,            noun: "Bible history" },
-		// cd before od to match the template's tab order (Church History, then On This Day).
+		// Ordered to match the template's tab strip: Church History, then On This Day, then Prayers.
 		{ id: "cd", data: CHURCHHISTORY, n: CH_NODES,    foot: (n) => `a Church History family tree (${n} branches)`, noun: "a Church History family tree" },
 		{ id: "od", data: ONTHISDAY, n: OTD_DAYS,        foot: (n) => `an On This Day calendar (${n} days)`, noun: "an On This Day calendar" },
+		{ id: "pd", data: PRAYERS,   n: PRAYERS.length,  foot: (n) => `${n} prayers`,                        noun: "prayers" },
 	];
 	const presentLayers = LAYERS.filter((l) => l.n > 0);
 	const andJoin = (arr) => arr.length <= 1 ? (arr[0] || "")
