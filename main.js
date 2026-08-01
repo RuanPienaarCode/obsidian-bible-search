@@ -52,7 +52,12 @@ const payloadLabel = (id) =>
 // default settings, and the build's gating.
 // The Bible itself is not a layer — it's always present.
 const CONTENT_LAYERS = [
-	{ key: "words",         label: "Words",          folder: "Bible/Word Studies" },
+	// folder: null because what makes the Words tab exist is the DICTIONARY, not the
+	// written studies — Bible/Word Studies/ is an optional extra that adds a Study
+	// link to the entries it covers, and a vault with none still gets all 14k words.
+	// Counting that folder here would report the layer missing on exactly the vaults
+	// the download is meant for.
+	{ key: "words",         label: "Words",          folder: null },
 	{ key: "topics",        label: "Topics",         folder: "Topics" },
 	{ key: "faq",           label: "FAQ",            folder: "FAQ" },
 	{ key: "history",       label: "Bible history",  folder: "Bible History" },
@@ -285,6 +290,20 @@ const CHURCHHISTORY_PACK_URL = `${RAW}/data/church-history.json`;
 // README); nothing copyrighted is shippable this way.
 const PRAYERS_FOLDER = "Prayers";
 const PRAYERS_PACK_URL = `${RAW}/data/prayers.json`;
+
+// The Strong's dictionary behind the Words tab is the fourth shareable layer, and
+// the only one that is pure public domain rather than original work — Strong's
+// Hebrew and Greek, parsed from openscriptures by tools/gen-lexicon.js.
+//
+// It is a download rather than vault content because of its size. At ~3 MB it is
+// bigger than every other layer put together, and a starter vault should not carry
+// it just in case: only someone who wants the Words tab pays for it. The path is
+// not free choice — the page asks its host for payload id "lex", which the bridge
+// resolves to exactly this file, so the download has to land here for the tab to
+// find it. (Published in the release step; until then it 404s.)
+const LEXICON_PACK_PATH = `${DATA_PATH}/lex.json`;
+const LEXICON_META_PATH = `${DATA_PATH}/lex-meta.json`;
+const LEXICON_PACK_URL = `${RAW}/data/lexicon.json`;
 
 // Transient 429/5xx happens over ~1,200 chapter fetches — retry with enough
 // backoff (1s/2s/4s/8s) to ride out a short outage burst instead of aborting
@@ -754,9 +773,9 @@ async function readLexiconMeta(app) {
 	const adapter = app.vault.adapter;
 	if (!adapter || typeof adapter.read !== "function") return null;
 	try {
-		const metaPath = normalizePath(`${DATA_PATH}/lex-meta.json`);
+		const metaPath = normalizePath(LEXICON_META_PATH);
 		if (!(await adapter.exists(metaPath))) return null;
-		if (!(await adapter.exists(normalizePath(`${DATA_PATH}/lex.json`)))) return null;
+		if (!(await adapter.exists(normalizePath(LEXICON_PACK_PATH)))) return null;
 		const meta = JSON.parse(await adapter.read(metaPath));
 		if (!meta || !meta.n) return null;
 		return { n: meta.n, hebrew: meta.hebrew, greek: meta.greek };
@@ -831,6 +850,40 @@ async function downloadChurchHistoryPack(app) {
 	await ensureFolder(app, packPath.split("/").slice(0, -1).join("/"));
 	await app.vault.adapter.write(packPath, JSON.stringify(pack));
 	return pack.nodes.length;
+}
+
+/* Fetch the Strong's dictionary pack and drop it in the vault, then write the
+ * counts file beside it. The counts are DERIVED here rather than downloaded as a
+ * second file: two fetches could half-succeed and leave meta promising a
+ * dictionary that isn't there, which is the one state readLexiconMeta() treats as
+ * "show the tab". Deriving them makes that impossible — meta is written last, and
+ * only from a payload already on disk.
+ *
+ * Validates the row shape before writing, because this is 3 MB of positional
+ * arrays: an HTML error page, a JSON object, or rows of the wrong width would all
+ * otherwise land as a dictionary the page then renders as blanks. Returns the
+ * number of entries written. */
+const lexShapeOk = (p) => Array.isArray(p) && p.length > 1000 &&
+	p.every((r) => Array.isArray(r) && r.length === 8 && /^[GH]\d+$/.test(r[0]));
+async function downloadLexiconPack(app) {
+	const res = await requestUrl({ url: LEXICON_PACK_URL, throw: false });
+	const status = res.status ?? 200;
+	if (status >= 400) throw new Error(`Dictionary pack not available (HTTP ${status}).`);
+	let pack;
+	try { pack = res.json ?? JSON.parse(res.text); }
+	catch { throw new Error("Dictionary pack was not valid JSON."); }
+	if (!lexShapeOk(pack)) {
+		throw new Error("Dictionary pack has an unexpected shape — nothing written.");
+	}
+	const packPath = normalizePath(LEXICON_PACK_PATH);
+	await ensureFolder(app, packPath.split("/").slice(0, -1).join("/"));
+	await app.vault.adapter.write(packPath, JSON.stringify(pack));
+	const hebrew = pack.filter((r) => r[0].charAt(0) === "H").length;
+	await app.vault.adapter.write(normalizePath(LEXICON_META_PATH), JSON.stringify({
+		n: pack.length, hebrew, greek: pack.length - hebrew,
+		generated: new Date().toISOString().slice(0, 10),
+	}));
+	return pack.length;
 }
 
 /* Fetch the shareable Prayers pack and write its notes into Prayers/. Unlike the
@@ -1333,6 +1386,11 @@ class OnboardingWizard extends Modal {
 			churchhistory: () =>
 				!!(v.getAbstractFileByPath("tools/data/denominations.js") ||
 					v.getAbstractFileByPath(CHURCHHISTORY_PACK_PATH)),
+			// Both halves, same rule readLexiconMeta() applies: counts without the
+			// dictionary beside them would show the tab and then fail to fill it.
+			words: () =>
+				!!(v.getAbstractFileByPath(LEXICON_PACK_PATH) &&
+					v.getAbstractFileByPath(LEXICON_META_PATH)),
 		};
 		const out = {};
 		for (const L of CONTENT_LAYERS) {
@@ -1364,6 +1422,10 @@ class OnboardingWizard extends Modal {
 				desc = present
 					? "Denomination family-tree data is in this vault."
 					: "Not in this vault yet — download the shareable pack (original blurbs + public data, no copyrighted text).";
+			} else if (L.key === "words") {
+				desc = present
+					? "Strong's Hebrew and Greek dictionary is in this vault."
+					: "Not in this vault yet — download Strong's Hebrew and Greek dictionary: every word of the original text, what it means and what the KJV calls it (public domain). About 3 MB, so it is a separate download rather than something every vault carries.";
 			} else if (L.key === "prayers") {
 				desc = present
 					? `${count} notes in Prayers/.`
@@ -1375,11 +1437,12 @@ class OnboardingWizard extends Modal {
 				.setName(L.label)
 				.setDesc(desc)
 				.addToggle((t) => t.setValue(this.data.layers[L.key]).onChange((v) => { this.data.layers[L.key] = v; }));
-			// The two shareable layers — offer the pack download when absent.
+			// The shareable layers — offer the pack download when absent.
 			const PACKS = {
 				onthisday:     { dl: downloadOnThisDayPack,     done: (n) => `On This Day pack added — ${n} calendar days.` },
 				churchhistory: { dl: downloadChurchHistoryPack, done: (n) => `Church History pack added — ${n} branches.` },
 				prayers:       { dl: downloadPrayersPack,       done: (n) => `Prayers added — ${n} notes in Prayers/.` },
+				words:         { dl: downloadLexiconPack,       done: (n) => `Dictionary added — ${n.toLocaleString()} Hebrew and Greek words.` },
 			};
 			if (PACKS[L.key] && !present) {
 				setting.addButton((b) => b
@@ -1922,6 +1985,10 @@ class BibleSearchSettingTab extends PluginSettingTab {
 			churchhistory: () =>
 				!!(this.app.vault.getAbstractFileByPath("tools/data/denominations.js") ||
 					this.app.vault.getAbstractFileByPath(CHURCHHISTORY_PACK_PATH)),
+			// Both halves, same rule readLexiconMeta() applies — see the wizard twin.
+			words: () =>
+				!!(this.app.vault.getAbstractFileByPath(LEXICON_PACK_PATH) &&
+					this.app.vault.getAbstractFileByPath(LEXICON_META_PATH)),
 		};
 		const layerDesc = (L) => {
 			const n = L.folder ? mdCount(L.folder) : 0;
@@ -2488,6 +2555,7 @@ module.exports.__testables = {
 	downloadOnThisDayPack, ONTHISDAY_PACK_PATH,
 	buildChurchHistoryFromVault, downloadChurchHistoryPack, CHURCHHISTORY_PACK_PATH,
 	downloadPrayersPack, PRAYERS_FOLDER,
+	readLexiconMeta, downloadLexiconPack, lexShapeOk, LEXICON_PACK_PATH, LEXICON_META_PATH,
 	surveyTranslations, buildSearchIndex, importTranslation, writeIfAbsent,
 	isTranslationComplete, fetchJson, runSetupPipeline, computePending,
 };
