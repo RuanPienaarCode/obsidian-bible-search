@@ -31,6 +31,7 @@ const DATA_PATH = "Bible/search-data";
 const CONTENT_LAYERS = [
 	{ key: "topics",        label: "Topics",         folder: "Topics" },
 	{ key: "faq",           label: "FAQ",            folder: "FAQ" },
+	{ key: "prayers",       label: "Prayers",        folder: "Prayers" },
 	{ key: "history",       label: "Bible history",  folder: "Bible History" },
 	{ key: "churchhistory", label: "Church History", folder: null },
 	{ key: "onthisday",     label: "On This Day",    folder: null },
@@ -222,7 +223,7 @@ const DOWNLOADABLE = [
 // three hand-typed strings that only happened to agree.
 // Pinned to a tag, never a moving branch, so what a fresh vault fetches is the
 // exact page this plugin release was audited with.
-const VAULT_TAG = "v1.2.16";
+const VAULT_TAG = "v1.2.17";
 const RAW = `https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/${VAULT_TAG}`;
 
 // Where the search template lives in the vault, and where to fetch it from.
@@ -827,6 +828,8 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 	onProgress?.("Indexing topics, FAQ & history…");
 	const TOPICS = on("topics") ? await collectNotesFromVault(app, "Topics", () => "Topic") : [];
 	const FAQ = on("faq") ? await collectNotesFromVault(app, "FAQ", () => "FAQ") : [];
+	const PRAYERS = on("prayers") ? await collectNotesFromVault(app, "Prayers",
+		(rel) => { const p = rel.split("/"); return p.length > 2 ? p[1] : "Prayer"; }) : [];
 	const HISTORY = on("history") ? await collectNotesFromVault(app, "Bible History",
 		(rel) => { const p = rel.split("/"); return p.length > 2 ? p[1] : "History"; }) : [];
 	const ONTHISDAY = on("onthisday") ? await buildOnThisDayFromVault(app) : {};
@@ -852,6 +855,7 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 		{ id: "ad", data: ARTICLES,  n: ARTICLES.length, foot: (n) => `${n} teaching articles`,             noun: "teaching articles" },
 		{ id: "td", data: TOPICS,    n: TOPICS.length,   foot: (n) => `${n} topics`,                         noun: "topics" },
 		{ id: "fd", data: FAQ,       n: FAQ.length,      foot: (n) => `${n} FAQ answers`,                    noun: "FAQ answers" },
+		{ id: "pd", data: PRAYERS,   n: PRAYERS.length,  foot: (n) => `${n} prayers`,                        noun: "prayers" },
 		{ id: "hd", data: HISTORY,   n: HISTORY.length,  foot: (n) => `${n} Bible-history notes`,            noun: "Bible history" },
 		// cd before od to match the template's tab order (Church History, then On This Day).
 		{ id: "cd", data: CHURCHHISTORY, n: CH_NODES,    foot: (n) => `a Church History family tree (${n} branches)`, noun: "a Church History family tree" },
@@ -946,7 +950,7 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 	return {
 		translations, verses, bytes: html.length,
 		articles: ARTICLES.length, topics: TOPICS.length,
-		faq: FAQ.length, history: HISTORY.length, onthisday: OTD_DAYS,
+		faq: FAQ.length, prayers: PRAYERS.length, history: HISTORY.length, onthisday: OTD_DAYS,
 		churchhistory: CH_NODES,
 	};
 }
@@ -1689,6 +1693,19 @@ class BibleSearchView extends ItemView {
 	}
 }
 
+/* ── older-Obsidian compatibility ────────────────────────────────────────────
+ * Three things the settings tab leans on arrived in Obsidian 1.13: the
+ * declarative settings API, ConfirmationModal, and ButtonComponent's
+ * setDestructive(). The plugin targets 1.13 first — that's what puts the
+ * settings into global search — and carries these shims so the same code still
+ * runs on 1.4+, where Obsidian calls display() instead of reading the
+ * definitions. Nothing else in the plugin postdates 1.4. */
+
+// setDestructive() (1.13+) vs the older setWarning() — the same red button.
+function destructive(btn) {
+	return typeof btn.setDestructive === "function" ? btn.setDestructive() : btn.setWarning();
+}
+
 class BibleSearchSettingTab extends PluginSettingTab {
 	constructor(app, plugin) {
 		super(app, plugin);
@@ -1944,9 +1961,7 @@ class BibleSearchSettingTab extends PluginSettingTab {
 						visible: () => !!this.plugin.settings.setupDownloads,
 						render: (setting) => {
 							setting.addButton((btn) =>
-								btn
-									.setButtonText("Cancel unfinished setup")
-									.setDestructive()
+								destructive(btn.setButtonText("Cancel unfinished setup"))
 									.onClick(() => this.confirmCancelSetup())
 							);
 						},
@@ -1960,26 +1975,93 @@ class BibleSearchSettingTab extends PluginSettingTab {
 	// which translations were still owed — so it asks first rather than firing
 	// off the back of a single click.
 	confirmCancelSetup() {
-		const modal = new ConfirmationModal(this.app);
-		modal.setTitle("Cancel unfinished setup?");
-		modal.setContent(
+		const title = "Cancel unfinished setup?";
+		const body =
 			"The remaining downloads won't be resumed. Anything already downloaded stays in your vault, " +
-			"and you can finish the rest at any time by running the setup wizard again."
-		);
-		modal.addCancelButton("Keep it");
-		modal.addButton((btn) =>
-			btn
-				.setButtonText("Cancel setup")
-				.setDestructive()
-				.setCta()
-				.onClick(async () => {
-					this.plugin.settings.setupDownloads = null;
-					await this.plugin.saveSettings();
-					new Notice("Bible Search: setup cancelled. Run the wizard when you want to finish it.");
-					this.update(); // re-evaluates `visible`, dropping the row
-				})
-		);
+			"and you can finish the rest at any time by running the setup wizard again.";
+		const commit = async () => {
+			this.plugin.settings.setupDownloads = null;
+			await this.plugin.saveSettings();
+			new Notice("Bible Search: setup cancelled. Run the wizard when you want to finish it.");
+			this.rerender(); // re-evaluates `visible`, dropping the row
+		};
+
+		if (typeof ConfirmationModal === "function") {
+			const modal = new ConfirmationModal(this.app);
+			modal.setTitle(title);
+			modal.setContent(body);
+			modal.addCancelButton("Keep it");
+			modal.addButton((btn) => destructive(btn.setButtonText("Cancel setup")).setCta().onClick(commit));
+			modal.open();
+			return;
+		}
+
+		// Pre-1.13: the same dialog, hand-built. titleEl/contentEl and Setting's
+		// button row are all long-standing API.
+		const modal = new Modal(this.app);
+		modal.titleEl.setText(title);
+		modal.contentEl.createEl("p", { text: body });
+		new Setting(modal.contentEl)
+			.addButton((btn) => btn.setButtonText("Keep it").onClick(() => modal.close()))
+			.addButton((btn) =>
+				destructive(btn.setButtonText("Cancel setup"))
+					.setCta()
+					.onClick(() => {
+						modal.close();
+						commit();
+					})
+			);
 		modal.open();
+	}
+
+	// this.update() is the 1.13 way to re-evaluate `visible` in place; older
+	// builds have no such hook, so they just re-run display().
+	rerender() {
+		if (typeof this.update === "function") this.update();
+		else if (this.containerEl) this.display();
+	}
+
+	/* Pre-1.13 fallback. Obsidian 1.13+ reads getSettingDefinitions() and skips
+	 * this entirely; older builds call it as they always have. It walks the same
+	 * definitions rather than restating them, so the two paths cannot drift —
+	 * the usual maintenance cost of dual support doesn't apply here. What older
+	 * builds lose is the global settings search, which is a 1.13 feature anyway. */
+	display() {
+		const { containerEl } = this;
+		containerEl.empty();
+
+		for (const group of this.getSettingDefinitions()) {
+			if (group.visible && !group.visible()) continue;
+			const items = (group.items || []).filter((item) => !item.visible || item.visible());
+			if (!items.length) continue;
+			if (group.heading) new Setting(containerEl).setName(group.heading).setHeading();
+
+			for (const item of items) {
+				const setting = new Setting(containerEl);
+				if (item.name) setting.setName(item.name);
+				if (item.desc) setting.setDesc(item.desc);
+
+				const control = item.control;
+				if (control && control.type === "text") {
+					setting.addText((text) => {
+						if (control.placeholder) text.setPlaceholder(control.placeholder);
+						text
+							.setValue(String(this.getControlValue(control.key) ?? ""))
+							.onChange((value) => this.setControlValue(control.key, value));
+					});
+				} else if (control && control.type === "toggle") {
+					setting.addToggle((toggle) =>
+						toggle
+							.setValue(!!this.getControlValue(control.key))
+							.onChange((value) => this.setControlValue(control.key, value))
+					);
+				}
+
+				// `render` may return a cleanup function on 1.13; nothing to unmount
+				// here, since display() rebuilds the container wholesale.
+				if (item.render) item.render(setting);
+			}
+		}
 	}
 }
 
@@ -2164,6 +2246,7 @@ class BibleSearchPlugin extends Plugin {
 				r.articles && `${r.articles} articles`,
 				r.topics && `${r.topics} topics`,
 				r.faq && `${r.faq} FAQ`,
+				r.prayers && `${r.prayers} prayers`,
 				r.history && `${r.history} history`,
 				r.onthisday && `${r.onthisday} On This Day days`,
 				r.churchhistory && `${r.churchhistory} Church History branches`,

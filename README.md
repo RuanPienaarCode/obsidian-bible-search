@@ -4,7 +4,8 @@ Full-text Bible search and reading in a first-class Obsidian view. A setup wizar
 downloads public-domain translations, builds a searchable page from your vault, and
 opens it in a pane — no terminal, no build step, no extra tooling.
 
-Works on desktop and mobile.
+Works on desktop and mobile, on Obsidian 1.4.0 and later. On Obsidian 1.13+ the
+plugin's settings also turn up in the global settings search.
 
 ## What it does
 
