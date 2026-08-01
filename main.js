@@ -223,7 +223,7 @@ const DOWNLOADABLE = [
 // three hand-typed strings that only happened to agree.
 // Pinned to a tag, never a moving branch, so what a fresh vault fetches is the
 // exact page this plugin release was audited with.
-const VAULT_TAG = "v1.2.17";
+const VAULT_TAG = "v1.2.18";
 const RAW = `https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/${VAULT_TAG}`;
 
 // Where the search template lives in the vault, and where to fetch it from.
@@ -250,6 +250,17 @@ const ONTHISDAY_PACK_URL = `${RAW}/data/on-this-day.json`;
 // until then it 404s.)
 const CHURCHHISTORY_PACK_PATH = "Bible/church-history.json";
 const CHURCHHISTORY_PACK_URL = `${RAW}/data/church-history.json`;
+
+// Prayers is the third shareable layer, and the only one whose pack is NOT a
+// finished payload: it carries the notes themselves ({ notes: [{path, body}] }),
+// which downloadPrayersPack() writes into Prayers/. From then on the layer is
+// indexed by the ordinary folder path with no special case — there is no
+// buildPrayersFromVault(), because there doesn't need to be one. A prayer card
+// links back to its note, so a payload-only pack would dead-link every result.
+// Every prayer is a public-domain rendering or original work (see the collection's
+// README); nothing copyrighted is shippable this way.
+const PRAYERS_FOLDER = "Prayers";
+const PRAYERS_PACK_URL = `${RAW}/data/prayers.json`;
 
 // Transient 429/5xx happens over ~1,200 chapter fetches — retry with enough
 // backoff (1s/2s/4s/8s) to ride out a short outage burst instead of aborting
@@ -775,6 +786,48 @@ async function downloadChurchHistoryPack(app) {
 	return pack.nodes.length;
 }
 
+/* Fetch the shareable Prayers pack and write its notes into Prayers/. Unlike the
+ * other two packs this writes MANY files at vault paths that came off the network,
+ * so every path is validated before it is used: it must be a .md under Prayers/,
+ * with no "..", no absolute or drive-letter form, and no backslash — normalizePath
+ * alone would not stop a "Prayers/../.obsidian/plugins/x/main.js" from escaping the
+ * folder. A note that already exists is left alone, so a re-download never clobbers
+ * a prayer the user has edited. Returns the number of notes actually written. */
+async function downloadPrayersPack(app) {
+	const res = await requestUrl({ url: PRAYERS_PACK_URL, throw: false });
+	const status = res.status ?? 200;
+	if (status >= 400) throw new Error(`Prayers pack not available (HTTP ${status}).`);
+	let pack;
+	try { pack = res.json ?? JSON.parse(res.text); }
+	catch { throw new Error("Prayers pack was not valid JSON."); }
+	const notes = pack && Array.isArray(pack.notes) ? pack.notes : null;
+	if (!notes || !notes.length) {
+		throw new Error("Prayers pack has an unexpected shape — nothing written.");
+	}
+	const safe = (p) =>
+		typeof p === "string" &&
+		p.endsWith(".md") &&
+		!p.includes("\\") &&
+		!p.split("/").includes("..") &&
+		!p.startsWith("/") &&
+		!/^[A-Za-z]:/.test(p) &&
+		p.startsWith(PRAYERS_FOLDER + "/");
+	if (!notes.every((n) => n && safe(n.path) && typeof n.body === "string")) {
+		throw new Error("Prayers pack contains an unexpected note path — nothing written.");
+	}
+	let written = 0;
+	for (const n of notes) {
+		const p = normalizePath(n.path);
+		// Re-check after normalizePath: it is the value actually written to.
+		if (!p.startsWith(PRAYERS_FOLDER + "/") || p.split("/").includes("..")) continue;
+		if (app.vault.getAbstractFileByPath(p)) continue;   // never clobber an edited prayer
+		await ensureFolder(app, p.split("/").slice(0, -1).join("/"));
+		await app.vault.create(p, n.body);
+		written++;
+	}
+	return written;
+}
+
 async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 	const vault = app.vault;
 	const { translations } = surveyTranslations(app);
@@ -1217,6 +1270,10 @@ class OnboardingWizard extends Modal {
 				desc = present
 					? "Denomination family-tree data is in this vault."
 					: "Not in this vault yet — download the shareable pack (original blurbs + public data, no copyrighted text).";
+			} else if (L.key === "prayers") {
+				desc = present
+					? `${count} notes in Prayers/.`
+					: "Not in this vault yet — download prayers of the church, from the desert fathers to the Reformation, in modern English. They arrive as ordinary notes you can read, edit and link.";
 			} else {
 				desc = present ? `${count} notes in ${L.folder}/.` : `No notes in ${L.folder}/ yet — add some and rebuild.`;
 			}
@@ -1228,6 +1285,7 @@ class OnboardingWizard extends Modal {
 			const PACKS = {
 				onthisday:     { dl: downloadOnThisDayPack,     done: (n) => `On This Day pack added — ${n} calendar days.` },
 				churchhistory: { dl: downloadChurchHistoryPack, done: (n) => `Church History pack added — ${n} branches.` },
+				prayers:       { dl: downloadPrayersPack,       done: (n) => `Prayers added — ${n} notes in Prayers/.` },
 			};
 			if (PACKS[L.key] && !present) {
 				setting.addButton((b) => b
@@ -1876,15 +1934,24 @@ class BibleSearchSettingTab extends PluginSettingTab {
 						aliases: ["terminal", "node", "cli", "command"],
 						visible: () => hasBuilder,
 						render: (setting) => {
+							// Selects the command text rather than writing it to the clipboard.
+							// The plugin deliberately touches NO clipboard API: it never needs to
+							// read one, and writing one made the community-directory scan report
+							// clipboard access for what is a convenience button. Selecting hands
+							// the copy to the OS, where the user is already in control of it — and
+							// it works on Obsidian iOS, where navigator.clipboard is often blocked
+							// in WKWebView and the old button silently failed.
 							setting.addButton((btn) =>
-								btn.setButtonText("Copy command").onClick(async () => {
-									// navigator.clipboard can be missing/blocked in WKWebView (Obsidian iOS).
-									try {
-										await navigator.clipboard.writeText(REBUILD_CMD);
-										new Notice("Rebuild command copied");
-									} catch (e) {
-										new Notice("Couldn't access the clipboard — select the command below and copy it.");
-									}
+								btn.setButtonText("Select command").onClick(() => {
+									const pre = setting.settingEl.parentElement?.querySelector(".bible-search-cmd");
+									if (!pre) return;
+									const sel = window.getSelection();
+									if (!sel) return;
+									const range = document.createRange();
+									range.selectNodeContents(pre);
+									sel.removeAllRanges();
+									sel.addRange(range);
+									new Notice("Rebuild command selected — copy it with your usual shortcut.");
 								})
 							);
 						},
@@ -2326,6 +2393,7 @@ module.exports.__testables = {
 	collectNotesFromVault, buildOnThisDayFromVault, CONTENT_LAYERS, layerEnabled,
 	downloadOnThisDayPack, ONTHISDAY_PACK_PATH,
 	buildChurchHistoryFromVault, downloadChurchHistoryPack, CHURCHHISTORY_PACK_PATH,
+	downloadPrayersPack, PRAYERS_FOLDER,
 	surveyTranslations, buildSearchIndex, importTranslation, writeIfAbsent,
 	isTranslationComplete, fetchJson, runSetupPipeline, computePending,
 };
