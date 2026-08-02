@@ -30,6 +30,9 @@ const DATA_PATH = "Bible/search-data";
      bx           book context (author, date, theme, outline) for all 66 books
      mp           the verse → place index behind the reader's Map tab
      bm           the basemap those places and the history maps are drawn on
+     bw           the world basemap, for church origins and the located calendar
+     jr           the journeys — ordered stops, resolved to the place table
+     hm           where each church branch began, and where each dated day happened
      il-<0–65>    Hebrew/Greek word-by-word tagged text, per book
      cm-<0–65>    chapter commentary, per book
      cmx          the searchable index over all of that commentary
@@ -41,7 +44,7 @@ const DATA_PATH = "Bible/search-data";
    path, and the page is a same-origin iframe. Ours or not, nothing coming out of
    an iframe gets to name an arbitrary file. Book numbers are bounded to 0–65
    rather than \d+ so "il-999" is refused at the gate, not at the file lookup. */
-const PAYLOAD_ID = /^(?:bd-[A-Za-z0-9]{1,24}|lex|xr|bx|mp|bm|cmx|(?:il|cm)-(?:[0-9]|[1-5][0-9]|6[0-5]))$/;
+const PAYLOAD_ID = /^(?:bd-[A-Za-z0-9]{1,24}|lex|xr|bx|mp|bm|bw|jr|hm|cmx|(?:il|cm)-(?:[0-9]|[1-5][0-9]|6[0-5]))$/;
 const payloadLabel = (id) =>
 	id.startsWith("bd-") ? `${id.slice(3)} verse data`
 	: id === "lex" ? "Dictionary"
@@ -49,6 +52,9 @@ const payloadLabel = (id) =>
 	: id === "bx" ? "Book context data"
 	: id === "mp" ? "Place data"
 	: id === "bm" ? "Map outlines"
+	: id === "bw" ? "World map outlines"
+	: id === "jr" ? "Journey data"
+	: id === "hm" ? "History map data"
 	: id === "cmx" ? "Commentary index"
 	: id.startsWith("il-") ? "Hebrew/Greek data"
 	: "Commentary data";
@@ -109,6 +115,10 @@ const DEFAULT_SETTINGS = {
 
 const REBUILD_CMD =
 	'node "Bible/build-bible-search.js" . "Bible/bible-search-template.html" "Bible Search.html"';
+
+// One Google Form takes both bug reports and feature requests — the form itself
+// asks which it is, so there's nothing to branch on here.
+const FEEDBACK_URL = "https://forms.gle/iSJue6USaxdXaKh96";
 
 // Folder docs, in the order someone new to the vault should meet them.
 const DOCS = [
@@ -269,7 +279,7 @@ const DOWNLOADABLE = [
 // three hand-typed strings that only happened to agree.
 // Pinned to a tag, never a moving branch, so what a fresh vault fetches is the
 // exact page this plugin release was audited with.
-const VAULT_TAG = "v1.2.24";
+const VAULT_TAG = "v1.2.25";
 const RAW = `https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/${VAULT_TAG}`;
 
 // Where the search template lives in the vault, and where to fetch it from.
@@ -336,6 +346,17 @@ const MAPS_PACK_PATH = `${DATA_PATH}/mp.json`;
 const BASEMAP_PACK_PATH = `${DATA_PATH}/bm.json`;
 const MAPS_PACK_URL = `${RAW}/data/places-map.json`;
 const BASEMAP_PACK_URL = `${RAW}/data/basemap.json`;
+// Everything the five map surfaces need, in one pack. Ordered so the two files the
+// reader's own Map tab depends on come first: a download that dies partway leaves
+// nothing written either way (see downloadMapsPack), but the order still says which
+// of these is the floor and which are the extras built on top of it.
+const MAP_PACK_FILES = [
+	{ url: MAPS_PACK_URL, path: MAPS_PACK_PATH, label: "Maps pack", check: (d) => mapsShapeOk(d) },
+	{ url: BASEMAP_PACK_URL, path: BASEMAP_PACK_PATH, label: "Basemap pack", check: (d) => basemapShapeOk(d) },
+	{ url: `${RAW}/data/basemap-world.json`, path: `${DATA_PATH}/bw.json`, label: "World basemap pack", check: (d) => basemapShapeOk(d) },
+	{ url: `${RAW}/data/journeys.json`, path: `${DATA_PATH}/jr.json`, label: "Journeys pack", check: (d) => journeysShapeOk(d) },
+	{ url: `${RAW}/data/history-map.json`, path: `${DATA_PATH}/hm.json`, label: "History map pack", check: (d) => historyMapShapeOk(d) },
+];
 
 // Transient 429/5xx happens over ~1,200 chapter fetches — retry with enough
 // backoff (1s/2s/4s/8s) to ride out a short outage burst instead of aborting
@@ -963,6 +984,16 @@ const basemapShapeOk = (b) => !!b && Number.isFinite(b.w) && Number.isFinite(b.h
 	Array.isArray(b.p) && b.p.length === 3 && b.p.every(Number.isFinite) &&
 	["land", "lakes", "rivers"].every((k) => Array.isArray(b[k]) &&
 		b[k].every((sh) => Array.isArray(sh) && sh.length === 5 && typeof sh[0] === "string"));
+// The routes: at least one journey, every stop carrying a coordinate.
+const journeysShapeOk = (d) => !!d && Array.isArray(d.j) && d.j.length > 0 &&
+	d.j.every((j) => j && typeof j.name === "string" && Array.isArray(j.stops) && j.stops.length > 1 &&
+		j.stops.every((st) => st && typeof st.n === "string" && Number.isFinite(st.lat) && Number.isFinite(st.lon)));
+// The two located history layers. Either may be empty on a vault whose calendar or
+// tree was trimmed, so the gate is the row SHAPE rather than the row count.
+const hmRowOk = (r, latAt) => Array.isArray(r) && Number.isFinite(r[latAt]) && Number.isFinite(r[latAt + 1]);
+const historyMapShapeOk = (d) => !!d && Array.isArray(d.ch) && Array.isArray(d.otd) &&
+	d.ch.every((r) => hmRowOk(r, 4)) && d.otd.every((r) => hmRowOk(r, 3));
+
 async function downloadMapsPack(app) {
 	const fetchJsonPack = async (url, label) => {
 		const res = await requestUrl({ url, throw: false });
@@ -971,15 +1002,18 @@ async function downloadMapsPack(app) {
 		try { return res.json ?? JSON.parse(res.text); }
 		catch { throw new Error(`${label} was not valid JSON.`); }
 	};
-	const places = await fetchJsonPack(MAPS_PACK_URL, "Maps pack");
-	if (!mapsShapeOk(places)) throw new Error("Maps pack has an unexpected shape — nothing written.");
-	const basemap = await fetchJsonPack(BASEMAP_PACK_URL, "Basemap pack");
-	if (!basemapShapeOk(basemap)) throw new Error("Basemap pack has an unexpected shape — nothing written.");
-	const dir = normalizePath(DATA_PATH);
-	await ensureFolder(app, dir);
-	await app.vault.adapter.write(normalizePath(MAPS_PACK_PATH), JSON.stringify(places));
-	await app.vault.adapter.write(normalizePath(BASEMAP_PACK_PATH), JSON.stringify(basemap));
-	return places.p.length;
+	// Fetch and validate ALL of them before writing ANY of them. They gate
+	// independently in the study manifest, so a half-download would render something
+	// — it just would not be the thing the button promised.
+	const got = [];
+	for (const f of MAP_PACK_FILES) {
+		const data = await fetchJsonPack(f.url, f.label);
+		if (!f.check(data)) throw new Error(`${f.label} has an unexpected shape — nothing written.`);
+		got.push({ f, data });
+	}
+	await ensureFolder(app, normalizePath(DATA_PATH));
+	for (const { f, data } of got) await app.vault.adapter.write(normalizePath(f.path), JSON.stringify(data));
+	return got[0].data.p.length;
 }
 
 /* Fetch the shareable Prayers pack and write its notes into Prayers/. Unlike the
@@ -1208,7 +1242,7 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 	   tagged text vendored outside the vault, which neither builder can reach), so
 	   an in-app rebuild must leave them exactly as it found them — which is also
 	   why the stale-sidecar sweep further up is scoped to bd-* alone. */
-	const STUDY = { xr: false, bx: false, mp: false, bm: false, il: [], cm: [] };
+	const STUDY = { xr: false, bx: false, mp: false, bm: false, bw: false, jr: false, hm: false, il: [], cm: [] };
 	const studyDir = vault.getAbstractFileByPath(normalizePath(DATA_PATH));
 	if (studyDir instanceof TFolder) {
 		for (const c of studyDir.children) {
@@ -1217,6 +1251,9 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 			if (c.name === "bx.json") { STUDY.bx = on("bookcontext"); continue; }
 			if (c.name === "mp.json") { STUDY.mp = on("places"); continue; }
 			if (c.name === "bm.json") { STUDY.bm = on("places"); continue; }
+			if (c.name === "bw.json") { STUDY.bw = on("places"); continue; }
+			if (c.name === "jr.json") { STUDY.jr = on("places"); continue; }
+			if (c.name === "hm.json") { STUDY.hm = on("places"); continue; }
 			const il = c.name.match(/^il-(\d+)\.json$/);
 			if (il && on("interlinear")) { STUDY.il.push(Number(il[1])); continue; }
 			const cm = c.name.match(/^cm-(\d+)\.json$/);
@@ -2333,6 +2370,25 @@ class BibleSearchSettingTab extends PluginSettingTab {
 					},
 				],
 			},
+			{
+				type: "group",
+				heading: "Feedback",
+				items: [
+					{
+						name: "Report a bug or request a feature",
+						desc: "Opens a Google Form in your browser. Say what you expected, what happened, and which vault folder it involved.",
+						aliases: ["bug", "feedback", "feature", "request", "report", "support", "issue"],
+						render: (setting) => {
+							setting.addButton((btn) =>
+								btn
+									.setButtonText("Open feedback form")
+									.setCta()
+									.onClick(() => window.open(FEEDBACK_URL, "_blank"))
+							);
+						},
+					},
+				],
+			},
 		];
 	}
 
@@ -2693,7 +2749,8 @@ module.exports.__testables = {
 	buildChurchHistoryFromVault, downloadChurchHistoryPack, CHURCHHISTORY_PACK_PATH,
 	downloadPrayersPack, PRAYERS_FOLDER,
 	readLexiconMeta, downloadLexiconPack, lexShapeOk, LEXICON_PACK_PATH, LEXICON_META_PATH,
-	downloadMapsPack, mapsShapeOk, basemapShapeOk, MAPS_PACK_PATH, BASEMAP_PACK_PATH,
+	downloadMapsPack, mapsShapeOk, basemapShapeOk, journeysShapeOk, historyMapShapeOk,
+	MAPS_PACK_PATH, BASEMAP_PACK_PATH, MAP_PACK_FILES,
 	surveyTranslations, buildSearchIndex, importTranslation, writeIfAbsent,
 	isTranslationComplete, fetchJson, runSetupPipeline, computePending,
 };
