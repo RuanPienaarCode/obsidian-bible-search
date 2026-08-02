@@ -74,6 +74,12 @@ const CONTENT_LAYERS = [
 	{ key: "history",       label: "Bible history",  folder: "Bible History" },
 	{ key: "churchhistory", label: "Church History", folder: null },
 	{ key: "onthisday",     label: "On This Day",    folder: null },
+	// folder: null again, and this one gates TWO surfaces from one key: the History
+	// group's Maps tab and the Map tab in the reader's per-verse study panel. Both
+	// read search-data sidecars rather than notes, so there is no folder to count —
+	// what makes the layer exist is mp.json (which place each verse names) and
+	// bm.json (the coastlines they are drawn on).
+	{ key: "places",        label: "Maps",           folder: null },
 	{ key: "prayers",       label: "Prayers",        folder: "Prayers" },
 	{ key: "articles",      label: "Articles",       folder: "Teaching" },
 ];
@@ -263,7 +269,7 @@ const DOWNLOADABLE = [
 // three hand-typed strings that only happened to agree.
 // Pinned to a tag, never a moving branch, so what a fresh vault fetches is the
 // exact page this plugin release was audited with.
-const VAULT_TAG = "v1.2.23";
+const VAULT_TAG = "v1.2.24";
 const RAW = `https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/${VAULT_TAG}`;
 
 // Where the search template lives in the vault, and where to fetch it from.
@@ -319,6 +325,17 @@ const LEXICON_META_PATH = `${DATA_PATH}/lex-meta.json`;
 const CMINDEX_PACK_PATH = `${DATA_PATH}/cmx.json`;
 const CMINDEX_META_PATH = `${DATA_PATH}/cmx-meta.json`;
 const LEXICON_PACK_URL = `${RAW}/data/lexicon.json`;
+
+// The Maps layer is two sidecars, not one, and they answer different questions:
+// mp.json is which places each verse names, bm.json the coastlines both map
+// surfaces are drawn on. Shipped as a pack for the same reason as the dictionary —
+// they are generated from vendored datasets (openbible geocoding, CC-BY; Natural
+// Earth, public domain) that a downloaded vault has no copy of, so without this
+// the maps would be a feature only a vault with the sources could ever see.
+const MAPS_PACK_PATH = `${DATA_PATH}/mp.json`;
+const BASEMAP_PACK_PATH = `${DATA_PATH}/bm.json`;
+const MAPS_PACK_URL = `${RAW}/data/places-map.json`;
+const BASEMAP_PACK_URL = `${RAW}/data/basemap.json`;
 
 // Transient 429/5xx happens over ~1,200 chapter fetches — retry with enough
 // backoff (1s/2s/4s/8s) to ride out a short outage burst instead of aborting
@@ -924,6 +941,47 @@ async function downloadLexiconPack(app) {
 	return pack.length;
 }
 
+/* Fetch the two map sidecars and drop them in the vault.
+ *
+ * Both, or neither. They gate independently in the study manifest — mp without bm
+ * is a Map tab that lists rather than plots, bm without mp is a History map with no
+ * verse places — and both of those are states the page handles. But they are one
+ * layer and one button, and "download the maps" leaving half the maps behind is a
+ * confusing thing to have to explain, so the writes happen only after BOTH payloads
+ * are fetched and validated. Nothing is written on a partial failure.
+ *
+ * Validating the shape matters more here than the byte count suggests: an HTML error
+ * page, or a basemap whose projection constants are missing, would otherwise land as
+ * a file the page trusts. `bm.p` is the one field with no safe default — get it wrong
+ * and every pin is placed somewhere plausible and wrong, which is worse than no map.
+ * Returns the number of places written. */
+const mapsShapeOk = (p) => !!p && Array.isArray(p.p) && p.p.length > 100 && !!p.v &&
+	typeof p.v === "object" &&
+	p.p.every((r) => Array.isArray(r) && r.length === 5 &&
+		typeof r[0] === "string" && Number.isFinite(r[1]) && Number.isFinite(r[2]));
+const basemapShapeOk = (b) => !!b && Number.isFinite(b.w) && Number.isFinite(b.h) &&
+	Array.isArray(b.p) && b.p.length === 3 && b.p.every(Number.isFinite) &&
+	["land", "lakes", "rivers"].every((k) => Array.isArray(b[k]) &&
+		b[k].every((sh) => Array.isArray(sh) && sh.length === 5 && typeof sh[0] === "string"));
+async function downloadMapsPack(app) {
+	const fetchJsonPack = async (url, label) => {
+		const res = await requestUrl({ url, throw: false });
+		const status = res.status ?? 200;
+		if (status >= 400) throw new Error(`${label} not available (HTTP ${status}).`);
+		try { return res.json ?? JSON.parse(res.text); }
+		catch { throw new Error(`${label} was not valid JSON.`); }
+	};
+	const places = await fetchJsonPack(MAPS_PACK_URL, "Maps pack");
+	if (!mapsShapeOk(places)) throw new Error("Maps pack has an unexpected shape — nothing written.");
+	const basemap = await fetchJsonPack(BASEMAP_PACK_URL, "Basemap pack");
+	if (!basemapShapeOk(basemap)) throw new Error("Basemap pack has an unexpected shape — nothing written.");
+	const dir = normalizePath(DATA_PATH);
+	await ensureFolder(app, dir);
+	await app.vault.adapter.write(normalizePath(MAPS_PACK_PATH), JSON.stringify(places));
+	await app.vault.adapter.write(normalizePath(BASEMAP_PACK_PATH), JSON.stringify(basemap));
+	return places.p.length;
+}
+
 /* Fetch the shareable Prayers pack and write its notes into Prayers/. Unlike the
  * other two packs this writes MANY files at vault paths that came off the network,
  * so every path is validated before it is used: it must be a .md under Prayers/,
@@ -1444,6 +1502,12 @@ class OnboardingWizard extends Modal {
 			commentary: () =>
 				!!(v.getAbstractFileByPath(CMINDEX_PACK_PATH) &&
 					v.getAbstractFileByPath(CMINDEX_META_PATH)),
+			// Present when the vault can draw a map: either sidecar alone still
+			// produces something, but the pack writes both, so both is the state
+			// this reports as done — and the one that stops offering the button.
+			places: () =>
+				!!(v.getAbstractFileByPath(MAPS_PACK_PATH) &&
+					v.getAbstractFileByPath(BASEMAP_PACK_PATH)),
 		};
 		const out = {};
 		for (const L of CONTENT_LAYERS) {
@@ -1486,6 +1550,10 @@ class OnboardingWizard extends Modal {
 				desc = present
 					? "Verse-by-verse commentary is in this vault — searchable, and shown beside the chapter as you read."
 					: "Not in this vault yet — this layer is built from commentary sources rather than downloaded, so there is nothing to fetch here.";
+			} else if (L.key === "places") {
+				desc = present
+					? "The places each verse names, plotted — and the timeline of Bible and church history put where it happened."
+					: "Not in this vault yet — download the maps: the places each verse names, plotted on an offline basemap, plus the history timeline put where it happened.";
 			} else if (L.key === "prayers") {
 				desc = present
 					? `${count} notes in Prayers/.`
@@ -1503,6 +1571,7 @@ class OnboardingWizard extends Modal {
 				churchhistory: { dl: downloadChurchHistoryPack, done: (n) => `Church History pack added — ${n} branches.` },
 				prayers:       { dl: downloadPrayersPack,       done: (n) => `Prayers added — ${n} notes in Prayers/.` },
 				words:         { dl: downloadLexiconPack,       done: (n) => `Dictionary added — ${n.toLocaleString()} Hebrew and Greek words.` },
+				places:        { dl: downloadMapsPack,          done: (n) => `Maps added — ${n.toLocaleString()} places, and the basemap they are drawn on.` },
 			};
 			if (PACKS[L.key] && !present) {
 				setting.addButton((b) => b
@@ -2053,6 +2122,10 @@ class BibleSearchSettingTab extends PluginSettingTab {
 			commentary: () =>
 				!!(this.app.vault.getAbstractFileByPath(CMINDEX_PACK_PATH) &&
 					this.app.vault.getAbstractFileByPath(CMINDEX_META_PATH)),
+			// Both map sidecars — see the wizard twin.
+			places: () =>
+				!!(this.app.vault.getAbstractFileByPath(MAPS_PACK_PATH) &&
+					this.app.vault.getAbstractFileByPath(BASEMAP_PACK_PATH)),
 		};
 		const layerDesc = (L) => {
 			const n = L.folder ? mdCount(L.folder) : 0;
@@ -2620,6 +2693,7 @@ module.exports.__testables = {
 	buildChurchHistoryFromVault, downloadChurchHistoryPack, CHURCHHISTORY_PACK_PATH,
 	downloadPrayersPack, PRAYERS_FOLDER,
 	readLexiconMeta, downloadLexiconPack, lexShapeOk, LEXICON_PACK_PATH, LEXICON_META_PATH,
+	downloadMapsPack, mapsShapeOk, basemapShapeOk, MAPS_PACK_PATH, BASEMAP_PACK_PATH,
 	surveyTranslations, buildSearchIndex, importTranslation, writeIfAbsent,
 	isTranslationComplete, fetchJson, runSetupPipeline, computePending,
 };
