@@ -120,6 +120,10 @@ const REBUILD_CMD =
 // asks which it is, so there's nothing to branch on here.
 const FEEDBACK_URL = "https://forms.gle/iSJue6USaxdXaKh96";
 
+// Optional, one-off, and deliberately not nagged about anywhere else in the
+// plugin — the settings row below is the only place it is ever mentioned.
+const SUPPORT_URL = "https://www.paypal.com/paypalme/ruanpienaar86";
+
 // Folder docs, in the order someone new to the vault should meet them.
 const DOCS = [
 	{
@@ -2365,6 +2369,27 @@ class BibleSearchSettingTab extends PluginSettingTab {
 							setting.addButton((btn) =>
 								destructive(btn.setButtonText("Cancel unfinished setup"))
 									.onClick(() => this.confirmCancelSetup())
+							);
+						},
+					},
+				],
+			},
+			{
+				type: "group",
+				heading: "Support",
+				items: [
+					{
+						name: "Support the plugin",
+						desc:
+							"Bible Search is free, offline and has no account behind it — no subscription, no ads, " +
+							"nothing tracked. If it's become part of how you study and you'd like to help keep it " +
+							"going, a one-off gift is welcome. Nothing in the plugin is locked behind it.",
+						aliases: ["support", "donate", "donation", "paypal", "tip", "contribute", "give", "sponsor"],
+						render: (setting) => {
+							setting.addButton((btn) =>
+								btn
+									.setButtonText("Support via PayPal")
+									.onClick(() => window.open(SUPPORT_URL, "_blank"))
 							);
 						},
 					},
