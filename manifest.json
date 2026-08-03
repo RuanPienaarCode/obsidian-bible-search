@@ -3,7 +3,7 @@
 	"name": "Bible Search",
 	"version": "1.1.39",
 	"minAppVersion": "1.4.0",
-	"description": "Search every verse of the Bible instantly from a pane, read across translations, and keep all your data local. No account, no cloud, no tracking. Includes topics, FAQ, prayers, Bible history, a Church History tree and an On This Day calendar.",
+	"description": "Full-text Bible search and reading in your vault. Public-domain translations, downloaded once, searchable offline.",
 	"author": "RuanPienaarCode",
 	"authorUrl": "https://github.com/RuanPienaarCode",
 	"fundingUrl": "https://www.paypal.com/paypalme/ruanpienaar86",
