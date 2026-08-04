@@ -45,11 +45,12 @@ const DATA_PATH = "Bible/search-data";
    path, and the page is a same-origin iframe. Ours or not, nothing coming out of
    an iframe gets to name an arbitrary file. Book numbers are bounded to 0–65
    rather than \d+ so "il-999" is refused at the gate, not at the file lookup. */
-const PAYLOAD_ID = /^(?:bd-[A-Za-z0-9]{1,24}|lex|xr|bx|mp|bm|bw|jr|hm|al|cmx|(?:il|cm)-(?:[0-9]|[1-5][0-9]|6[0-5]))$/;
+const PAYLOAD_ID = /^(?:bd-[A-Za-z0-9]{1,24}|lex|xr|xa|bx|mp|bm|bw|jr|hm|al|cmx|(?:il|cm)-(?:[0-9]|[1-5][0-9]|6[0-5]))$/;
 const payloadLabel = (id) =>
 	id.startsWith("bd-") ? `${id.slice(3)} verse data`
 	: id === "lex" ? "Dictionary"
 	: id === "xr" ? "Cross-reference data"
+	: id === "xa" ? "Anchored cross-reference data"
 	: id === "bx" ? "Book context data"
 	: id === "mp" ? "Place data"
 	: id === "bm" ? "Map outlines"
@@ -1253,12 +1254,16 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 	   tagged text vendored outside the vault, which neither builder can reach), so
 	   an in-app rebuild must leave them exactly as it found them — which is also
 	   why the stale-sidecar sweep further up is scoped to bd-* alone. */
-	const STUDY = { xr: false, bx: false, mp: false, bm: false, bw: false, jr: false, hm: false, al: false, il: [], cm: [] };
+	const STUDY = { xr: false, xa: false, bx: false, mp: false, bm: false, bw: false, jr: false, hm: false, al: false, il: [], cm: [] };
 	const studyDir = vault.getAbstractFileByPath(normalizePath(DATA_PATH));
 	if (studyDir instanceof TFolder) {
 		for (const c of studyDir.children) {
 			if (!(c instanceof TFile)) continue;
 			if (c.name === "xr.json") { STUDY.xr = on("xrefs"); continue; }
+			/* xa.json is xr.json's richer twin — the same references, grouped under the
+			   catchword each belongs to. Same "xrefs" layer, because to a reader they are
+			   one feature; the page prefers xa and falls back to xr when it is absent. */
+			if (c.name === "xa.json") { STUDY.xa = on("xrefs"); continue; }
 			if (c.name === "bx.json") { STUDY.bx = on("bookcontext"); continue; }
 			if (c.name === "mp.json") { STUDY.mp = on("places"); continue; }
 			if (c.name === "bm.json") { STUDY.bm = on("places"); continue; }
