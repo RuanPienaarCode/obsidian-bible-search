@@ -881,7 +881,12 @@ async function readCommentaryIndexMeta(app) {
 		if (!(await adapter.exists(normalizePath(CMINDEX_PACK_PATH)))) return null;
 		const meta = JSON.parse(await adapter.read(metaPath));
 		if (!meta || !meta.n) return null;
-		return { n: meta.n, books: meta.books, who: meta.who };
+		/* `cov` — blocks, books and licence per commentator — is what the tab's
+		 * opening card is drawn from: with an empty box the Commentary tab
+		 * introduces each source, and a source has to be sized and licensed there
+		 * rather than guessed at. Optional, so an index generated before it existed
+		 * still shows a working tab that names its voices without sizing them. */
+		return { n: meta.n, books: meta.books, who: meta.who, cov: meta.cov || null };
 	} catch (e) {
 		console.warn("Bible Search: commentary index meta unreadable —", e.message);
 		return null;
