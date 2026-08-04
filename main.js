@@ -23,6 +23,13 @@ const VIEW_TYPE = "bible-search-view";
 // The page asks for these by id through the bridge in wireBridge(); both the
 // in-app builder below and Bible/build-bible-search.js write them here.
 const DATA_PATH = "Bible/search-data";
+/* Where the reader's own marks live. This one file is WRITTEN by the page rather
+   than generated for it, so it is named here as a constant and never derived from
+   anything the iframe sends — see bibleSearchSaveMarks() in wireBridge(). It sits
+   beside the generated sidecars on purpose: the stale-sidecar sweep in the index
+   build is scoped to bd-*, so nothing in there will ever remove it. */
+const MARKS_PATH = normalizePath(`${DATA_PATH}/marks.json`);
+const MARKS_MAX = 4e6;
 /* Which payload ids the page is allowed to ask the vault for.
      bd-<TRANS>   verse text, one per translation
      lex          the Strong's dictionary behind the Words tab
@@ -45,7 +52,7 @@ const DATA_PATH = "Bible/search-data";
    path, and the page is a same-origin iframe. Ours or not, nothing coming out of
    an iframe gets to name an arbitrary file. Book numbers are bounded to 0–65
    rather than \d+ so "il-999" is refused at the gate, not at the file lookup. */
-const PAYLOAD_ID = /^(?:bd-[A-Za-z0-9]{1,24}|lex|xr|xa|bx|mp|bm|bw|jr|hm|al|cmx|(?:il|cm)-(?:[0-9]|[1-5][0-9]|6[0-5]))$/;
+const PAYLOAD_ID = /^(?:bd-[A-Za-z0-9]{1,24}|lex|xr|xa|bx|mp|bm|bw|jr|hm|al|pl|cmx|pl-(?:[0-9]|[1-9][0-9])|(?:il|cm)-(?:[0-9]|[1-5][0-9]|6[0-5]))$/;
 const payloadLabel = (id) =>
 	id.startsWith("bd-") ? `${id.slice(3)} verse data`
 	: id === "lex" ? "Dictionary"
@@ -58,6 +65,8 @@ const payloadLabel = (id) =>
 	: id === "jr" ? "Journey data"
 	: id === "hm" ? "History map data"
 	: id === "al" ? "Tribal allotment data"
+	: id === "pl" ? "Atlas plate index"
+	: id.startsWith("pl-") ? "Atlas plate"
 	: id === "cmx" ? "Commentary index"
 	: id.startsWith("il-") ? "Hebrew/Greek data"
 	: "Commentary data";
@@ -286,7 +295,7 @@ const DOWNLOADABLE = [
 // three hand-typed strings that only happened to agree.
 // Pinned to a tag, never a moving branch, so what a fresh vault fetches is the
 // exact page this plugin release was audited with.
-const VAULT_TAG = "v1.2.31";
+const VAULT_TAG = "v1.2.32";
 const RAW = `https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/${VAULT_TAG}`;
 
 // Where the search template lives in the vault, and where to fetch it from.
@@ -365,6 +374,16 @@ const MAP_PACK_FILES = [
 	{ url: `${RAW}/data/history-map.json`, path: `${DATA_PATH}/hm.json`, label: "History map pack", check: (d) => historyMapShapeOk(d) },
 	{ url: `${RAW}/data/allotments.json`, path: `${DATA_PATH}/al.json`, label: "Allotments pack", check: (d) => allotmentsShapeOk(d) },
 ];
+
+/* The plates are their own pack, deliberately NOT part of MAP_PACK_FILES.
+ * Everything above is vector and the six files together are ~1.2 MB; the plates are
+ * scans of a 1911 atlas and the ten together are ~5.4 MB. Folding them in would mean
+ * every vault that wanted a coastline paid five times over for photographs it never
+ * asked for. Separate button, separate decision. */
+const PLATES_INDEX_PATH = `${DATA_PATH}/pl.json`;
+const PLATES_INDEX_URL = `${RAW}/data/plates.json`;
+const platePartUrl = (i) => `${RAW}/data/plate-${i}.json`;
+const platePartPath = (i) => `${DATA_PATH}/pl-${i}.json`;
 
 // Transient 429/5xx happens over ~1,200 chapter fetches — retry with enough
 // backoff (1s/2s/4s/8s) to ride out a short outage burst instead of aborting
@@ -1003,6 +1022,17 @@ const allotmentsShapeOk = (d) => !!d && Array.isArray(d.a) && d.a.length > 0 &&
 // The two located history layers. Either may be empty on a vault whose calendar or
 // tree was trimmed, so the gate is the row SHAPE rather than the row count.
 const hmRowOk = (r, latAt) => Array.isArray(r) && Number.isFinite(r[latAt]) && Number.isFinite(r[latAt + 1]);
+/* The index carries no pixels, so this checks the shape the page navigates by: a
+ * plate must know its own number, its size, and which books it answers to. */
+const platesShapeOk = (d) => !!d && Array.isArray(d.plates) && d.plates.length > 0 &&
+	d.plates.every((p) => Number.isInteger(p.i) && typeof p.title === "string" && p.title.length > 0 &&
+		Number.isFinite(p.w) && Number.isFinite(p.h) && Array.isArray(p.books));
+/* A body is one image. The mime allow-list matters: this string is pasted into a
+ * data: URL and handed to an <img>, so anything the page would treat as markup has
+ * to fail here rather than in the DOM. */
+const plateBodyShapeOk = (d) => !!d && (d.mime === "image/webp" || d.mime === "image/jpeg") &&
+	typeof d.data === "string" && d.data.length > 512 && /^[A-Za-z0-9+/=]+$/.test(d.data);
+
 const historyMapShapeOk = (d) => !!d && Array.isArray(d.ch) && Array.isArray(d.otd) &&
 	d.ch.every((r) => hmRowOk(r, 4)) && d.otd.every((r) => hmRowOk(r, 3));
 
@@ -1026,6 +1056,39 @@ async function downloadMapsPack(app) {
 	await ensureFolder(app, normalizePath(DATA_PATH));
 	for (const { f, data } of got) await app.vault.adapter.write(normalizePath(f.path), JSON.stringify(data));
 	return got[0].data.p.length;
+}
+
+/* Fetch Shepherd's plates. Unlike the map pack this streams — one plate at a time,
+ * written as it arrives — because holding ten base64 images in memory to satisfy an
+ * all-or-nothing rule would cost ~5 MB of string for no benefit the reader can see.
+ *
+ * What replaces that rule is ORDER: every body is written first and the index LAST.
+ * The index is the only thing the study manifest looks at, so a download that dies
+ * halfway leaves a vault with some unreferenced files and no plates tab — invisible,
+ * and repaired by pressing the button again. Writing the index first would instead
+ * leave a shelf of plates that open onto an error. */
+async function downloadPlatesPack(app) {
+	const res = await requestUrl({ url: PLATES_INDEX_URL, throw: false });
+	const status = res.status ?? 200;
+	if (status >= 400) throw new Error(`Plates pack not available (HTTP ${status}).`);
+	let index;
+	try { index = res.json ?? JSON.parse(res.text); }
+	catch { throw new Error("Plates pack index was not valid JSON."); }
+	if (!platesShapeOk(index)) throw new Error("Plates pack index has an unexpected shape — nothing written.");
+
+	await ensureFolder(app, normalizePath(DATA_PATH));
+	for (const p of index.plates) {
+		const r = await requestUrl({ url: platePartUrl(p.i), throw: false });
+		const st = r.status ?? 200;
+		if (st >= 400) throw new Error(`Plate ${p.i} not available (HTTP ${st}) — nothing added.`);
+		let body;
+		try { body = r.json ?? JSON.parse(r.text); }
+		catch { throw new Error(`Plate ${p.i} was not valid JSON — nothing added.`); }
+		if (!plateBodyShapeOk(body)) throw new Error(`Plate ${p.i} has an unexpected shape — nothing added.`);
+		await app.vault.adapter.write(normalizePath(platePartPath(p.i)), JSON.stringify(body));
+	}
+	await app.vault.adapter.write(normalizePath(PLATES_INDEX_PATH), JSON.stringify(index));
+	return index.plates.length;
 }
 
 /* Fetch the shareable Prayers pack and write its notes into Prayers/. Unlike the
@@ -1254,7 +1317,7 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 	   tagged text vendored outside the vault, which neither builder can reach), so
 	   an in-app rebuild must leave them exactly as it found them — which is also
 	   why the stale-sidecar sweep further up is scoped to bd-* alone. */
-	const STUDY = { xr: false, xa: false, bx: false, mp: false, bm: false, bw: false, jr: false, hm: false, al: false, il: [], cm: [] };
+	const STUDY = { xr: false, xa: false, bx: false, mp: false, bm: false, bw: false, jr: false, hm: false, al: false, pl: false, il: [], cm: [] };
 	const studyDir = vault.getAbstractFileByPath(normalizePath(DATA_PATH));
 	if (studyDir instanceof TFolder) {
 		for (const c of studyDir.children) {
@@ -1271,6 +1334,10 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 			if (c.name === "jr.json") { STUDY.jr = on("places"); continue; }
 			if (c.name === "hm.json") { STUDY.hm = on("places"); continue; }
 			if (c.name === "al.json") { STUDY.al = on("places"); continue; }
+			/* Only the INDEX gates the tab. The plate bodies (pl-<n>.json) are fetched
+			   one at a time when a reader opens that plate, so listing them here would
+			   claim the page loads megabytes it never touches. */
+			if (c.name === "pl.json") { STUDY.pl = on("places"); continue; }
 			const il = c.name.match(/^il-(\d+)\.json$/);
 			if (il && on("interlinear")) { STUDY.il.push(Number(il[1])); continue; }
 			const cm = c.name.match(/^cm-(\d+)\.json$/);
@@ -1563,6 +1630,9 @@ class OnboardingWizard extends Modal {
 				!!(v.getAbstractFileByPath(MAPS_PACK_PATH) &&
 					v.getAbstractFileByPath(BASEMAP_PACK_PATH)),
 		};
+		// Plates are not a layer of their own — they ride the Maps toggle — so they
+		// are probed separately and reported as a second line under it.
+		this._platesPresent = !!v.getAbstractFileByPath(PLATES_INDEX_PATH);
 		const out = {};
 		for (const L of CONTENT_LAYERS) {
 			out[L.key] = L.folder ? { present: mdCount(L.folder) > 0, count: mdCount(L.folder) }
@@ -1607,6 +1677,7 @@ class OnboardingWizard extends Modal {
 			} else if (L.key === "places") {
 				desc = present
 					? "The places each verse names, plotted — and the timeline of Bible and church history put where it happened."
+					+ (this._platesPresent ? " Shepherd's 1911 atlas plates are here too." : "")
 					: "Not in this vault yet — download the maps: the places each verse names, plotted on an offline basemap, plus the history timeline put where it happened.";
 			} else if (L.key === "prayers") {
 				desc = present
@@ -1627,6 +1698,28 @@ class OnboardingWizard extends Modal {
 				words:         { dl: downloadLexiconPack,       done: (n) => `Dictionary added — ${n.toLocaleString()} Hebrew and Greek words.` },
 				places:        { dl: downloadMapsPack,          done: (n) => `Maps added — ${n.toLocaleString()} places, and the basemap they are drawn on.` },
 			};
+			/* Two packs live under the Maps toggle, and the second is offered whether
+			   or not the first has been taken: the plates need no basemap (they are
+			   photographs, not projections), so a vault can perfectly well have the
+			   atlas and nothing else. Hiding this until the vector maps arrived would
+			   gate 1911 scans behind a download they do not use. */
+			if (L.key === "places" && !this._platesPresent) {
+				setting.addButton((b) => b
+					.setButtonText("Download plates")
+					.setTooltip("Ten period maps from Shepherd's Historical Atlas (1911, public domain) — about 5 MB")
+					.onClick(async () => {
+						b.setButtonText("Downloading…").setDisabled(true);
+						try {
+							const n = await downloadPlatesPack(this.app);
+							this.data.layers.places = true;
+							new Notice(`Plates added — ${n} period maps from Shepherd's atlas.`);
+							this.renderStep();
+						} catch (e) {
+							new Notice(e && e.message ? e.message : String(e), 8000);
+							b.setButtonText("Download plates").setDisabled(false);
+						}
+					}));
+			}
 			if (PACKS[L.key] && !present) {
 				setting.addButton((b) => b
 					.setButtonText("Download pack")
@@ -2032,6 +2125,32 @@ class BibleSearchView extends ItemView {
 				// once there — no copy lingering in Obsidian's read cache.
 				return new TextDecoder().decode(await this.app.vault.readBinary(f));
 			};
+
+			/* The reader's own marks — highlights, bookmarks and verse notes — are the
+			   one thing that travels the other way, out of the page and into the vault.
+			   Deliberately NOT part of bibleSearchLoadData's id whitelist: a write needs
+			   a path the iframe can never name, so both ends are pinned to MARKS_PATH
+			   here and the page only ever hands over an opaque string.
+
+			   Absent file is not an error: it is what a vault looks like before the
+			   first highlight, and the page reads that as "nothing marked yet" rather
+			   than as a failure it should warn about. */
+			win.bibleSearchLoadMarks = async () => {
+				const f = this.app.vault.getAbstractFileByPath(MARKS_PATH);
+				if (!(f instanceof TFile)) return null;
+				return new TextDecoder().decode(await this.app.vault.readBinary(f));
+			};
+			win.bibleSearchSaveMarks = async (json) => {
+				if (typeof json !== "string") throw new Error("Marks must be serialised by the page");
+				// A ceiling rather than a target: the page debounces and writes the whole
+				// file, so a runaway loop there must not be able to fill the vault.
+				if (json.length > MARKS_MAX) throw new Error("Marks file is too large to save");
+				const f = this.app.vault.getAbstractFileByPath(MARKS_PATH);
+				if (f instanceof TFile) { await this.app.vault.modify(f, json); return; }
+				await ensureFolder(this.app, DATA_PATH);
+				await this.app.vault.create(MARKS_PATH, json);
+			};
+
 			// Warm the default translation once the shell has settled, so the first
 			// search hits parsed data instead of waiting on a disk read. Held so
 			// onClose can cancel it — otherwise closing the view inside 800ms leaves
@@ -2788,6 +2907,7 @@ module.exports.__testables = {
 	downloadPrayersPack, PRAYERS_FOLDER,
 	readLexiconMeta, downloadLexiconPack, lexShapeOk, LEXICON_PACK_PATH, LEXICON_META_PATH,
 	downloadMapsPack, mapsShapeOk, basemapShapeOk, journeysShapeOk, historyMapShapeOk, allotmentsShapeOk,
+	downloadPlatesPack, platesShapeOk, plateBodyShapeOk, PLATES_INDEX_PATH, platePartPath,
 	MAPS_PACK_PATH, BASEMAP_PACK_PATH, MAP_PACK_FILES,
 	surveyTranslations, buildSearchIndex, importTranslation, writeIfAbsent,
 	isTranslationComplete, fetchJson, runSetupPipeline, computePending,
