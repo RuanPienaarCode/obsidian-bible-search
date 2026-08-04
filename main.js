@@ -33,6 +33,7 @@ const DATA_PATH = "Bible/search-data";
      bw           the world basemap, for church origins and the located calendar
      jr           the journeys — ordered stops, resolved to the place table
      hm           where each church branch began, and where each dated day happened
+     al           the places Joshua names for each tribe's allotment
      il-<0–65>    Hebrew/Greek word-by-word tagged text, per book
      cm-<0–65>    chapter commentary, per book
      cmx          the searchable index over all of that commentary
@@ -44,7 +45,7 @@ const DATA_PATH = "Bible/search-data";
    path, and the page is a same-origin iframe. Ours or not, nothing coming out of
    an iframe gets to name an arbitrary file. Book numbers are bounded to 0–65
    rather than \d+ so "il-999" is refused at the gate, not at the file lookup. */
-const PAYLOAD_ID = /^(?:bd-[A-Za-z0-9]{1,24}|lex|xr|bx|mp|bm|bw|jr|hm|cmx|(?:il|cm)-(?:[0-9]|[1-5][0-9]|6[0-5]))$/;
+const PAYLOAD_ID = /^(?:bd-[A-Za-z0-9]{1,24}|lex|xr|bx|mp|bm|bw|jr|hm|al|cmx|(?:il|cm)-(?:[0-9]|[1-5][0-9]|6[0-5]))$/;
 const payloadLabel = (id) =>
 	id.startsWith("bd-") ? `${id.slice(3)} verse data`
 	: id === "lex" ? "Dictionary"
@@ -55,6 +56,7 @@ const payloadLabel = (id) =>
 	: id === "bw" ? "World map outlines"
 	: id === "jr" ? "Journey data"
 	: id === "hm" ? "History map data"
+	: id === "al" ? "Tribal allotment data"
 	: id === "cmx" ? "Commentary index"
 	: id.startsWith("il-") ? "Hebrew/Greek data"
 	: "Commentary data";
@@ -283,7 +285,7 @@ const DOWNLOADABLE = [
 // three hand-typed strings that only happened to agree.
 // Pinned to a tag, never a moving branch, so what a fresh vault fetches is the
 // exact page this plugin release was audited with.
-const VAULT_TAG = "v1.2.29";
+const VAULT_TAG = "v1.2.30";
 const RAW = `https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/${VAULT_TAG}`;
 
 // Where the search template lives in the vault, and where to fetch it from.
@@ -360,6 +362,7 @@ const MAP_PACK_FILES = [
 	{ url: `${RAW}/data/basemap-world.json`, path: `${DATA_PATH}/bw.json`, label: "World basemap pack", check: (d) => basemapShapeOk(d) },
 	{ url: `${RAW}/data/journeys.json`, path: `${DATA_PATH}/jr.json`, label: "Journeys pack", check: (d) => journeysShapeOk(d) },
 	{ url: `${RAW}/data/history-map.json`, path: `${DATA_PATH}/hm.json`, label: "History map pack", check: (d) => historyMapShapeOk(d) },
+	{ url: `${RAW}/data/allotments.json`, path: `${DATA_PATH}/al.json`, label: "Allotments pack", check: (d) => allotmentsShapeOk(d) },
 ];
 
 // Transient 429/5xx happens over ~1,200 chapter fetches — retry with enough
@@ -992,6 +995,10 @@ const basemapShapeOk = (b) => !!b && Number.isFinite(b.w) && Number.isFinite(b.h
 const journeysShapeOk = (d) => !!d && Array.isArray(d.j) && d.j.length > 0 &&
 	d.j.every((j) => j && typeof j.name === "string" && Array.isArray(j.stops) && j.stops.length > 1 &&
 		j.stops.every((st) => st && typeof st.n === "string" && Number.isFinite(st.lat) && Number.isFinite(st.lon)));
+// The tribal allotments: at least one, every located place carrying a coordinate.
+const allotmentsShapeOk = (d) => !!d && Array.isArray(d.a) && d.a.length > 0 &&
+	d.a.every((x) => x && typeof x.tribe === "string" && Array.isArray(x.points) && x.points.length > 0 &&
+		x.points.every((pt) => pt && typeof pt.n === "string" && Number.isFinite(pt.lat) && Number.isFinite(pt.lon)));
 // The two located history layers. Either may be empty on a vault whose calendar or
 // tree was trimmed, so the gate is the row SHAPE rather than the row count.
 const hmRowOk = (r, latAt) => Array.isArray(r) && Number.isFinite(r[latAt]) && Number.isFinite(r[latAt + 1]);
@@ -1246,7 +1253,7 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 	   tagged text vendored outside the vault, which neither builder can reach), so
 	   an in-app rebuild must leave them exactly as it found them — which is also
 	   why the stale-sidecar sweep further up is scoped to bd-* alone. */
-	const STUDY = { xr: false, bx: false, mp: false, bm: false, bw: false, jr: false, hm: false, il: [], cm: [] };
+	const STUDY = { xr: false, bx: false, mp: false, bm: false, bw: false, jr: false, hm: false, al: false, il: [], cm: [] };
 	const studyDir = vault.getAbstractFileByPath(normalizePath(DATA_PATH));
 	if (studyDir instanceof TFolder) {
 		for (const c of studyDir.children) {
@@ -1258,6 +1265,7 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 			if (c.name === "bw.json") { STUDY.bw = on("places"); continue; }
 			if (c.name === "jr.json") { STUDY.jr = on("places"); continue; }
 			if (c.name === "hm.json") { STUDY.hm = on("places"); continue; }
+			if (c.name === "al.json") { STUDY.al = on("places"); continue; }
 			const il = c.name.match(/^il-(\d+)\.json$/);
 			if (il && on("interlinear")) { STUDY.il.push(Number(il[1])); continue; }
 			const cm = c.name.match(/^cm-(\d+)\.json$/);
@@ -2774,7 +2782,7 @@ module.exports.__testables = {
 	buildChurchHistoryFromVault, downloadChurchHistoryPack, CHURCHHISTORY_PACK_PATH,
 	downloadPrayersPack, PRAYERS_FOLDER,
 	readLexiconMeta, downloadLexiconPack, lexShapeOk, LEXICON_PACK_PATH, LEXICON_META_PATH,
-	downloadMapsPack, mapsShapeOk, basemapShapeOk, journeysShapeOk, historyMapShapeOk,
+	downloadMapsPack, mapsShapeOk, basemapShapeOk, journeysShapeOk, historyMapShapeOk, allotmentsShapeOk,
 	MAPS_PACK_PATH, BASEMAP_PACK_PATH, MAP_PACK_FILES,
 	surveyTranslations, buildSearchIndex, importTranslation, writeIfAbsent,
 	isTranslationComplete, fetchJson, runSetupPipeline, computePending,
