@@ -295,7 +295,7 @@ const DOWNLOADABLE = [
 // three hand-typed strings that only happened to agree.
 // Pinned to a tag, never a moving branch, so what a fresh vault fetches is the
 // exact page this plugin release was audited with.
-const VAULT_TAG = "v1.2.34";
+const VAULT_TAG = "v1.2.35";
 const RAW = `https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/${VAULT_TAG}`;
 
 // Where the search template lives in the vault, and where to fetch it from.
@@ -2150,6 +2150,14 @@ class BibleSearchView extends ItemView {
 				// A ceiling rather than a target: the page debounces and writes the whole
 				// file, so a runaway loop there must not be able to fill the vault.
 				if (json.length > MARKS_MAX) throw new Error("Marks file is too large to save");
+				// Parsed, not trusted. The string is deliberately opaque to this end, so
+				// the one thing that CAN be checked is that it is JSON at all. Without
+				// this a page-side bug writes junk that bibleSearchLoadMarks hands back
+				// on the next open, normalizeMarks() refuses it, and the reader's whole
+				// mark set silently reads as empty — with the real marks already gone.
+				// Refusing the write keeps the last good file on disk instead.
+				try { JSON.parse(json); }
+				catch (e) { throw new Error("Marks were not serialisable JSON — nothing written"); }
 				const f = this.app.vault.getAbstractFileByPath(MARKS_PATH);
 				if (f instanceof TFile) { await this.app.vault.modify(f, json); return; }
 				await ensureFolder(this.app, DATA_PATH);
