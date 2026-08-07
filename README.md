@@ -61,4 +61,6 @@ Free forever. If you'd like to say thanks:
 - [scripture-vault](https://github.com/RuanPienaarCode/scripture-vault) — the full starter vault
 - [bible.helloao.org](https://bible.helloao.org) — Bible text source
 
-Code: MIT ([LICENSE](LICENSE)). Bible text keeps its own licence.
+Code: [PolyForm Noncommercial 1.0.0](LICENSE) — free for personal and other
+noncommercial use; commercial use needs a separate licence. Bible text keeps its
+own licence.
