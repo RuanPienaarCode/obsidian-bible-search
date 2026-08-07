@@ -1,0 +1,40 @@
+NOTICE
+======
+
+Bible Search
+Copyright (c) 2026 RuanPienaarCode
+
+
+CURRENT LICENCE
+---------------
+
+As of 7 August 2026 this project is licensed under the PolyForm
+Noncommercial License 1.0.0. The full terms are in LICENSE.
+
+Personal use, hobby use, and use by charitable, educational, research,
+public safety, health, environmental and government organisations are all
+permitted. Commercial use is not granted by those terms — contact the
+copyright holder to arrange a commercial licence.
+
+These terms cover the plugin's own code. Bible text and any other
+third-party content keep their own licences.
+
+
+PRIOR LICENCE (MIT)
+-------------------
+
+Before that date this project was licensed under the MIT License.
+
+The relicence took effect in commit 7af8a12, committed 2026-08-07 at
+22:32:55 +02:00.
+
+Everything up to and including commit f4a563c, and every release up to
+and including 1.1.52 (published 7 August 2026), was distributed under the
+MIT License. Those copies remain under the MIT License permanently.
+
+An MIT grant cannot be withdrawn from anyone who already received a copy
+under it. This notice records when the licence changed; it does not
+revoke anything previously granted.
+
+The PolyForm Noncommercial terms apply to copies obtained from commit
+7af8a12 onward.
