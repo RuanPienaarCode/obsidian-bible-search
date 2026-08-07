@@ -1,0 +1,101 @@
+.bible-search-view {
+	padding: 0;
+	overflow: hidden;
+	/* Lay the view out as a flex column so the iframe fills it as the growing
+	   child. On desktop that alone works — Obsidian gives .view-content a definite
+	   height. On mobile the ancestor height is NOT definite, so the flex column
+	   has nothing to fill and the iframe collapses (only the tabs show — the page
+	   auto-scrolls to the focused search box — then the app background). fitFrame()
+	   pins an inline height (and matching min-height) here from the leaf's real
+	   rendered height, which is always definite, so the column has both a floor to
+	   fill and a ceiling: an iframe taller than the pane would be clipped by the
+	   overflow:hidden below, and the page inside would lay out against a box that
+	   runs off the screen. */
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+}
+
+.bible-search-frame {
+	flex: 1 1 auto;
+	width: 100%;
+	min-height: 0;
+	border: 0;
+	background: transparent;
+}
+
+/* settings — rebuild command + quick reference */
+
+/* A declarative setting row whose render() replaced the usual info/control
+   split with one full-width block (the rebuild <pre>, a quick-reference
+   <details>). The default row is a flex line with a border; both are wrong for
+   a block, so reset them here rather than fighting the row from inside. */
+.bible-search-block-row.setting-item {
+	display: block;
+	padding: 0.4em 0 0;
+	border-top: none;
+}
+
+.bible-search-doclead {
+	margin: 0 0 1em;
+}
+
+.bible-search-cmd {
+	margin: -0.4em 0 1.4em;
+	padding: 0.7em 0.9em;
+	overflow-x: auto;
+	font-size: var(--font-smaller);
+	color: var(--text-muted);
+	background: var(--background-primary-alt);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	user-select: all;
+}
+
+.bible-search-ref {
+	margin: 0 0 0.6em;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+}
+
+.bible-search-ref summary {
+	padding: 0.6em 0.9em;
+	color: var(--text-normal);
+	cursor: pointer;
+}
+
+.bible-search-ref pre {
+	margin: 0;
+	padding: 0 0.9em 0.9em;
+	overflow-x: auto;
+	font-size: var(--font-smaller);
+	color: var(--text-muted);
+	white-space: pre-wrap;
+}
+
+/* onboarding wizard */
+.bible-search-onb-step {
+	margin: 0 0 0.8em;
+	font-size: var(--font-smaller);
+	color: var(--text-muted);
+}
+
+/* dedicated-vault recommendation callout on the first wizard step */
+.bible-search-onb-rec {
+	margin: 0 0 1em;
+	padding: 0.75em 1em;
+	border-left: 3px solid var(--interactive-accent);
+	border-radius: 4px;
+	background: var(--background-secondary);
+	font-size: var(--font-smaller);
+	line-height: 1.5;
+}
+
+.bible-search-error {
+	max-width: 32em;
+	margin: 3em auto;
+	padding: 1.5em;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	color: var(--text-muted);
+}
