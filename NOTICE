@@ -27,17 +27,15 @@ Before that date this project was licensed under the MIT License.
 
 The relicence took effect on 7 August 2026.
 
-Everything published before then — including every release up to and
-including 1.1.52 as originally published on 7 August 2026 — was
-distributed under the MIT License. Those copies remain under the MIT
-License permanently.
+Every release up to and including 1.1.52 was distributed under the MIT
+License. Those copies remain under the MIT License permanently.
+
+Release 1.1.53 is the first release published under the PolyForm
+Noncommercial terms, and those terms apply from it onward.
 
 An MIT grant cannot be withdrawn from anyone who already received a copy
 under it. This notice records when the licence changed; it does not
 revoke anything previously granted.
-
-The PolyForm Noncommercial terms apply to copies obtained from
-7 August 2026 onward.
 
 This repository's git history was reset on 7 August 2026, so commit
 identifiers from before that date no longer resolve here.
