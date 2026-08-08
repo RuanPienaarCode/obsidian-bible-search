@@ -8,34 +8,35 @@ Copyright (c) 2026 RuanPienaarCode
 CURRENT LICENCE
 ---------------
 
-As of 7 August 2026 this project is licensed under the PolyForm
-Noncommercial License 1.0.0. The full terms are in LICENSE.
+As of 8 August 2026 this project is licensed under the GNU General Public
+License, version 3. The full terms are in LICENSE.
 
-Personal use, hobby use, and use by charitable, educational, research,
-public safety, health, environmental and government organisations are all
-permitted. Commercial use is not granted by those terms — contact the
-copyright holder to arrange a commercial licence.
+You may use, study, modify and redistribute it, including commercially.
+The condition is reciprocity: if you distribute it, modified or not, you
+must pass on the same freedoms and make the corresponding source
+available under the GPL.
 
 These terms cover the plugin's own code. Bible text and any other
 third-party content keep their own licences.
 
 
-PRIOR LICENCE (MIT)
--------------------
+LICENCE HISTORY
+---------------
 
-Before that date this project was licensed under the MIT License.
+  MIT                            up to 7 August 2026
+  PolyForm Noncommercial 1.0.0   7 to 8 August 2026
+  GNU GPL v3                     from 8 August 2026
 
-The relicence took effect on 7 August 2026.
+By release:
 
-Every release up to and including 1.1.52 was distributed under the MIT
-License. Those copies remain under the MIT License permanently.
+  up to and including 1.1.52     MIT
+  1.1.53 and 1.1.54              PolyForm Noncommercial 1.0.0
+  from the next release onward   GNU GPL v3
 
-Release 1.1.53 is the first release published under the PolyForm
-Noncommercial terms, and those terms apply from it onward.
-
-An MIT grant cannot be withdrawn from anyone who already received a copy
-under it. This notice records when the licence changed; it does not
-revoke anything previously granted.
+Copies obtained under an earlier licence remain under that licence
+permanently. A licence grant cannot be withdrawn from someone who has
+already received a copy under it. This notice records the changes; it
+does not revoke anything previously granted.
 
 This repository's git history was reset on 7 August 2026, so commit
 identifiers from before that date no longer resolve here.
