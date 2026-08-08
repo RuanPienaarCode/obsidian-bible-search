@@ -1,9 +1,9 @@
 {
 	"id": "bible-search",
 	"name": "Bible Search",
-	"version": "1.1.54",
+	"version": "1.1.55",
 	"minAppVersion": "1.4.0",
-	"description": "Full-text Bible search and reading in your vault. Public-domain translations, downloaded once, searchable offline.",
+	"description": "Full-text Bible search and reading in your vault. Public-domain translations download once and work offline. Includes maps, a timeline, a Hebrew and Greek dictionary, and per-verse highlights, bookmarks and notes.",
 	"author": "RuanPienaarCode",
 	"authorUrl": "https://github.com/RuanPienaarCode",
 	"fundingUrl": "https://www.paypal.com/paypalme/ruanpienaar86",
