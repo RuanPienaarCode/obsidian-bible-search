@@ -8,33 +8,29 @@ Copyright (c) 2026 RuanPienaarCode
 CURRENT LICENCE
 ---------------
 
-This project is licensed under the PolyForm Noncommercial License 1.0.0.
-The full terms are in LICENSE.
+This project is licensed under the MIT License. The full terms are in
+LICENSE.
 
-Personal use, hobby use, and use by charitable, educational, research,
-public safety, health, environmental and government organisations are all
-permitted, free of charge. Commercial use is not granted by those terms —
-contact the copyright holder to arrange a commercial licence.
+Personal use, commercial use, modification, distribution and sublicensing
+are all permitted, free of charge, provided the copyright notice and the
+permission notice are kept with any substantial portion of the software.
 
 These terms cover the plugin's own code. Bible text and any other
 third-party content keep their own licences.
-
-GitHub reports this repository as having "no recognized license". That is
-expected. GitHub only detects open-source licences, and a licence that
-bars commercial use is by definition not one of them. The warning is the
-accepted cost of the licence, not a defect.
 
 
 LICENCE HISTORY
 ---------------
 
   MIT                            up to 7 August 2026
-  PolyForm Noncommercial 1.0.0   from 7 August 2026 (current)
+  PolyForm Noncommercial 1.0.0   7 August 2026 to 8 August 2026
+  MIT                            from 8 August 2026 (current)
 
 By release:
 
   up to and including 1.1.52     MIT
-  1.1.53 onward                  PolyForm Noncommercial 1.0.0
+  1.1.53 through 1.1.56          PolyForm Noncommercial 1.0.0
+  1.1.57 onward                  MIT
 
 GNU GPL v3 was briefly published on 8 August 2026 and withdrawn the same
 day, before any release was cut under it. A copy taken during that short
@@ -43,7 +39,12 @@ window is GPL v3 and stays so.
 Copies obtained under an earlier licence remain under that licence
 permanently. A licence grant cannot be withdrawn from someone who has
 already received a copy under it. This notice records the changes; it
-does not revoke anything previously granted.
+does not revoke anything previously granted. In particular, releases
+1.1.53 through 1.1.56 were published under PolyForm Noncommercial and
+remain noncommercial-only for anyone holding those copies; the MIT terms
+above apply from 1.1.57 onward.
 
 This repository's git history was reset on 7 August 2026, so commit
-identifiers from before that date no longer resolve here.
+identifiers from before that date no longer resolve on the main branch.
+The pre-reset history was restored on 8 August 2026 as the branch
+archive/pre-2026-08-07 and as tags under archive/, for reference.
