@@ -88,4 +88,7 @@ Free, and staying that way. If you would like to say thanks:
 - [scripture-vault](https://github.com/RuanPienaarCode/scripture-vault) — the full starter vault
 - [bible.helloao.org](https://bible.helloao.org) — Bible text source
 
-Code: [MIT](LICENSE). Bible text keeps its own licence.
+Code: [AGPL-3.0](LICENSE) — use it, change it, share it, personally or
+commercially; anything you distribute or run as a network service on top of
+it has to be AGPL-3.0 with its source available too. Bible text keeps its
+own licence.

@@ -8,12 +8,15 @@ Copyright (c) 2026 RuanPienaarCode
 CURRENT LICENCE
 ---------------
 
-This project is licensed under the MIT License. The full terms are in
-LICENSE.
+This project is licensed under the GNU Affero General Public License
+version 3. The full terms are in LICENSE.
 
-Personal use, commercial use, modification, distribution and sublicensing
-are all permitted, free of charge, provided the copyright notice and the
-permission notice are kept with any substantial portion of the software.
+Personal use, commercial use, modification and distribution are all
+permitted, free of charge. In exchange, anything you distribute that is
+based on this software must itself be released under the AGPL v3, with
+its complete corresponding source. Section 13 extends that to network
+use: if you run a modified version and let users interact with it over a
+network, those users must be offered the source of your modified version.
 
 These terms cover the plugin's own code. Bible text and any other
 third-party content keep their own licences.
@@ -24,13 +27,15 @@ LICENCE HISTORY
 
   MIT                            up to 7 August 2026
   PolyForm Noncommercial 1.0.0   7 August 2026 to 8 August 2026
-  MIT                            from 8 August 2026 (current)
+  MIT                            8 August 2026 to 9 August 2026
+  GNU AGPL v3                    from 9 August 2026 (current)
 
 By release:
 
   up to and including 1.1.52     MIT
   1.1.53 through 1.1.56          PolyForm Noncommercial 1.0.0
-  1.1.57 onward                  MIT
+  1.1.57 through 1.1.58          MIT
+  1.1.59 onward                  GNU AGPL v3
 
 GNU GPL v3 was briefly published on 8 August 2026 and withdrawn the same
 day, before any release was cut under it. A copy taken during that short
@@ -41,8 +46,9 @@ permanently. A licence grant cannot be withdrawn from someone who has
 already received a copy under it. This notice records the changes; it
 does not revoke anything previously granted. In particular, releases
 1.1.53 through 1.1.56 were published under PolyForm Noncommercial and
-remain noncommercial-only for anyone holding those copies; the MIT terms
-above apply from 1.1.57 onward.
+remain noncommercial-only for anyone holding those copies, and releases
+1.1.57 and 1.1.58 were published under MIT and remain MIT for anyone
+holding those copies; the AGPL v3 terms above apply from 1.1.59 onward.
 
 This repository's git history was reset on 7 August 2026, so commit
 identifiers from before that date no longer resolve on the main branch.
