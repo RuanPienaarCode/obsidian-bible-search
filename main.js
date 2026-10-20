@@ -52,7 +52,7 @@ const MARKS_MAX = 4e6;
    path, and the page is a same-origin iframe. Ours or not, nothing coming out of
    an iframe gets to name an arbitrary file. Book numbers are bounded to 0–65
    rather than \d+ so "il-999" is refused at the gate, not at the file lookup. */
-const PAYLOAD_ID = /^(?:bd-[A-Za-z0-9]{1,24}|lex|xr|xa|bx|mp|bm|bw|jr|hm|al|pl|cmx|pl-(?:[0-9]|[1-9][0-9])|(?:il|cm)-(?:[0-9]|[1-5][0-9]|6[0-5]))$/;
+const PAYLOAD_ID = /^(?:bd-[A-Za-z0-9]{1,24}|ab|lex|xr|xa|bx|mp|bm|bw|jr|hm|al|pl|cmx|pl-(?:[0-9]|[1-9][0-9])|(?:il|cm)-(?:[0-9]|[1-5][0-9]|6[0-5]))$/;
 const payloadLabel = (id) =>
 	id.startsWith("bd-") ? `${id.slice(3)} verse data`
 	: id === "lex" ? "Dictionary"
@@ -301,9 +301,9 @@ const DOWNLOADABLE = [
 // without having been part of a reviewed release. Both are written by
 // tools/pin-release.js from the tag itself.
 // BEGIN PINNED — written by tools/pin-release.js; never edit by hand
-const VAULT_TAG = "v1.2.45";
+const VAULT_TAG = "v1.2.46";
 const PINNED_SHA256 = {
-	"Bible/bible-search-template.html": "a4d0a38281d2cc1dc561539dc127ff631834d56a8980deaebae8e9ab8cf208b6",
+	"Bible/bible-search-template.html": "528650bdce98086c36503f63b677e39abe851b8ea70cf6fadb7d1119e32ae0e3",
 	"data/allotments.json": "8fa44d7c48c9700752cf49e4847778a169d7745d546011093af2917ffdc779b7",
 	"data/basemap-world.json": "6115947df678db8eec0ff99ea3ac302ca77a80aa150c1b84e2b5650a2f09c1f1",
 	"data/basemap.json": "de8d45688d51228f1ef92aebd7083b2bbd4582c612fa951c64711f9465974576",
@@ -1383,6 +1383,9 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 	const escHtml = (s) => String(s)
 		.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 		.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+	// Article bodies go to the "ab" sidecar, not the page — same as the Node builder;
+	// the page keeps each row with its body null and reads the bodies on first use.
+	const ARTICLE_ROWS = ARTICLES.map((a) => { const r = a.slice(); r[7] = null; return r; });
 	const LAYERS = [
 		// Words ships as two payloads: "lx" (the dictionary's counts — its presence
 		// shows the tab, since the dictionary is the lex.json sidecar) and "wd" (the
@@ -1400,7 +1403,7 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 		{ id: "cd", data: CHURCHHISTORY, n: CH_NODES,    foot: (n) => `a Church History family tree (${n} branches)`, noun: "a Church History family tree" },
 		{ id: "od", data: ONTHISDAY, n: OTD_DAYS,        foot: (n) => `an On This Day calendar (${n} days)`, noun: "an On This Day calendar" },
 		{ id: "pd", data: PRAYERS,   n: PRAYERS.length,  foot: (n) => `${n} prayers`,                        noun: "prayers" },
-		{ id: "ad", data: ARTICLES,  n: ARTICLES.length, foot: (n) => `${n} teaching articles`,             noun: "teaching articles" },
+		{ id: "ad", data: ARTICLE_ROWS, n: ARTICLES.length, foot: (n) => `${n} teaching articles`,             noun: "teaching articles" },
 	];
 	const presentLayers = LAYERS.filter((l) => l.n > 0);
 	const andJoin = (arr) => arr.length <= 1 ? (arr[0] || "")
@@ -1440,6 +1443,22 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 				try { await vault.delete(child); } catch (e) { /* stale sidecar survives — harmless */ }
 			}
 		}
+	}
+
+	// The article bodies, in the order of the "ad" rows the page carries.
+	const abPath = normalizePath(`${DATA_PATH}/ab.json`);
+	const abFile = vault.getAbstractFileByPath(abPath);
+	if (ARTICLES.length) {
+		const json = JSON.stringify(ARTICLES.map((a) => a[7]));
+		if (abFile instanceof TFile) {
+			let prev = null;
+			try { prev = await vault.adapter.read(abPath); } catch (e) { /* rewrite */ }
+			if (prev !== json) await vault.modify(abFile, json);
+		} else {
+			await vault.create(abPath, json);
+		}
+	} else if (abFile instanceof TFile) {
+		try { await vault.delete(abFile); } catch (e) { /* a stale body file is never asked for */ }
 	}
 
 	const dataScripts = presentLayers
