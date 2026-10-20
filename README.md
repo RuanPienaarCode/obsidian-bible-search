@@ -70,6 +70,10 @@ The template is the search page's own HTML and JavaScript. Each plugin release p
 one tagged version of it, and a rebuild fetches it again only when a plugin update has
 moved that pin. A template you have edited yourself is kept, never overwritten.
 
+Every file fetched from `raw.githubusercontent.com` (the template and each extra) is
+checked against the SHA-256 recorded in the plugin release. A file that doesn't match
+is refused and nothing is written.
+
 If setup is interrupted (Obsidian closed mid-download), the remaining downloads resume
 by themselves the next time Obsidian starts. Finished files are kept.
 

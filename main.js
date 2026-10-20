@@ -294,9 +294,118 @@ const DOWNLOADABLE = [
 // template and both packs can never drift onto different tags — they used to be
 // three hand-typed strings that only happened to agree.
 // Pinned to a tag, never a moving branch, so what a fresh vault fetches is the
-// exact page this plugin release was audited with.
-const VAULT_TAG = "v1.2.42";
+// exact page this plugin release was audited with. A tag is still only a name, and
+// a name can be moved — so every file fetched from it also carries the SHA-256 it
+// had when this release was cut, and fetchPinned() refuses anything else. The
+// template is the page's own JavaScript: nothing that runs in the page may arrive
+// without having been part of a reviewed release. Both are written by
+// tools/pin-release.js from the tag itself.
+// BEGIN PINNED — written by tools/pin-release.js; never edit by hand
+const VAULT_TAG = "v1.2.43";
+const PINNED_SHA256 = {
+	"Bible/bible-search-template.html": "2629b1a9407abfe86ef48dc9f6adb098fb6de43f90868807c3e2df28ae5cc105",
+	"data/allotments.json": "8fa44d7c48c9700752cf49e4847778a169d7745d546011093af2917ffdc779b7",
+	"data/basemap-world.json": "6115947df678db8eec0ff99ea3ac302ca77a80aa150c1b84e2b5650a2f09c1f1",
+	"data/basemap.json": "de8d45688d51228f1ef92aebd7083b2bbd4582c612fa951c64711f9465974576",
+	"data/church-history.json": "2bb6dfddd400c31905a8b3a4f8263f1e06ee351864d49fd7cd7c1a5f89d88085",
+	"data/history-map.json": "4bd930e2da33968ed6d1b61f2eec067e143a047ca2ffac4ef2071516237d32a9",
+	"data/journeys.json": "fcf04d4546e42f55ae004d1d5a3e1045f6e5ebc0c564b0627f9bcc0a54d830fb",
+	"data/lexicon.json": "f2e91403cb2185a6ba85b1a4221151bea60d6558871b77b1018ccefe794d198c",
+	"data/on-this-day.json": "6348f19b311d3175997a1e606611436e4b005658c7b92b536e9b73abe73a7911",
+	"data/places-map.json": "7e827f2bf92069e425013452e5b134c1ed7b767491c0fd710eaa76739f239364",
+	"data/plate-0.json": "1c0c9bb6de96f6c27a187e40f315852d1238a7d5346eb15f152e5a55380602ba",
+	"data/plate-1.json": "aa03370c34b8f85a6e4a1c565ac5dd3f67666721845523f4e606b18ed688c98f",
+	"data/plate-2.json": "7aa3038f2076437b561373f399e11fb5fe503633b0e5d62ff5374cb713bde3c1",
+	"data/plate-3.json": "0feea12e6b627a2981bcc6438ff0d8d93e0ad196119ec8ecfbd2110f898f8127",
+	"data/plate-4.json": "ed3dfed954736ddf8abed994cc1c5d9b4e129fb3c219055212a8b994df11561f",
+	"data/plate-5.json": "0ef719b3a4c4fd5af9cf1cde226caa6e0a9ceed37aab0e6cecf648b4f7cf456d",
+	"data/plate-6.json": "e83ee77a202c0c18fb26a5da0eda8ed952a854f8d71a513893d35d14d13b3803",
+	"data/plate-7.json": "894edee5d68de987f91fb1039b7cd62496896620210b3bd8709ff4d90bb2268a",
+	"data/plate-8.json": "6a386567df007582871ee47fdbf4204894442e1e52defa016d732426758da0d1",
+	"data/plate-9.json": "97da3a45459a2d2aac0cb554ac4a05ae57aa8d46a40db3c8ffa873ff57efb744",
+	"data/plates.json": "e908223f1bf7126d2ccb86dbd0247f05f044670adb52dcd54e8b5446603def4c",
+	"data/prayers.json": "977c960282368a3fd41ba2592833ec0090da0fd152822831368ec36ab967e644",
+};
+// END PINNED
 const RAW = `https://raw.githubusercontent.com/RuanPienaarCode/scripture-vault/${VAULT_TAG}`;
+
+/* SHA-256 in plain JS, for WebViews where crypto.subtle is missing (it needs a
+ * secure context, and a mobile app's origin is not guaranteed to count as one).
+ * bytes: Uint8Array → lowercase hex. */
+const SHA256_K = [
+	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+	0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+	0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+	0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+	0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+	0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+	0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+	0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+function sha256Js(bytes) {
+	const len = bytes.length;
+	const padded = new Uint8Array(Math.ceil((len + 9) / 64) * 64);
+	padded.set(bytes);
+	padded[len] = 0x80;
+	const dv = new DataView(padded.buffer);
+	dv.setUint32(padded.length - 8, Math.floor(len / 0x20000000));
+	dv.setUint32(padded.length - 4, (len * 8) >>> 0);
+	const H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+	const w = new Uint32Array(64);
+	for (let off = 0; off < padded.length; off += 64) {
+		for (let i = 0; i < 16; i++) w[i] = dv.getUint32(off + i * 4);
+		for (let i = 16; i < 64; i++) {
+			const x = w[i - 15], y = w[i - 2];
+			const s0 = ((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3);
+			const s1 = ((y >>> 17) | (y << 15)) ^ ((y >>> 19) | (y << 13)) ^ (y >>> 10);
+			w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+		}
+		let [a, b, c, d, e, f, g, h] = H;
+		for (let i = 0; i < 64; i++) {
+			const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+			const t1 = (h + S1 + ((e & f) ^ (~e & g)) + SHA256_K[i] + w[i]) | 0;
+			const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+			const t2 = (S0 + ((a & b) ^ (a & c) ^ (b & c))) | 0;
+			h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;
+		}
+		H[0] = (H[0] + a) | 0; H[1] = (H[1] + b) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0;
+		H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + h) | 0;
+	}
+	return H.map((x) => (x >>> 0).toString(16).padStart(8, "0")).join("");
+}
+async function sha256Hex(bytes) {
+	const subtle = globalThis.crypto && globalThis.crypto.subtle;
+	if (subtle && typeof subtle.digest === "function") {
+		try {
+			const d = new Uint8Array(await subtle.digest("SHA-256", bytes));
+			return Array.from(d, (x) => x.toString(16).padStart(2, "0")).join("");
+		} catch (e) { /* not available in this context — the plain-JS digest below */ }
+	}
+	return sha256Js(bytes);
+}
+
+/* Every download from scripture-vault goes through here. Non-2xx responses pass
+ * straight back for the caller to report as it always has; a 2xx body is hashed
+ * and refused unless it is byte-for-byte the file this release pinned. */
+async function fetchPinned(url, opts) {
+	const rel = url.startsWith(RAW + "/") ? url.slice(RAW.length + 1) : "";
+	if (!rel || !Object.prototype.hasOwnProperty.call(PINNED_SHA256, rel)) {
+		const e = new Error(`${rel || url} is not one of the files this plugin release pins — not downloaded.`);
+		e.pinned = true;
+		throw e;
+	}
+	const res = await requestUrl({ url, throw: opts && opts.throw === true });
+	const status = res.status ?? 200;
+	if (status < 200 || status >= 300) return res;
+	const got = await sha256Hex(new Uint8Array(res.arrayBuffer));
+	if (got !== PINNED_SHA256[rel]) {
+		const e = new Error(`${rel} at ${VAULT_TAG} is not the file this plugin release was built with — not installed. ` +
+			"Update Bible Search, or report this if you are already on the latest version.");
+		e.pinned = true;
+		throw e;
+	}
+	return res;
+}
 
 // Where the search template lives in the vault, and where to fetch it from.
 // It is NOT user content — it is this plugin's UI that happens to be a vault
@@ -443,7 +552,8 @@ function fingerprint(s) {
  * "carefully customised one", and silently discarding the second is much worse
  * than carrying the first for one more release.
  *
- * Returns one of: "written" | "updated" | "current" | "adopted" | "kept-local" | "kept-offline".
+ * Returns one of: "written" | "updated" | "current" | "adopted" | "kept-local" | "kept-offline"
+ * | "kept-unverified" (an update arrived that did not match its pin — the old one stays).
  */
 async function ensureTemplate(app, settings, onProgress) {
 	const path = normalizePath(TEMPLATE_PATH);
@@ -466,8 +576,11 @@ async function ensureTemplate(app, settings, onProgress) {
 	onProgress?.(have ? "Updating the search template…" : "Fetching the search template…");
 	let res;
 	try {
-		res = await requestUrl({ url: TEMPLATE_URL });
+		res = await fetchPinned(TEMPLATE_URL, { throw: true });
 	} catch (e) {
+		// A download that is not the pinned file is never written. With a template
+		// already in place, the reader keeps it and is told; without one, setup stops.
+		if (e && e.pinned) { if (have) return "kept-unverified"; throw e; }
 		if (have) return "kept-offline";
 		throw new Error(`Couldn't fetch the search template from ${TEMPLATE_URL} — check your connection and try again.`);
 	}
@@ -631,6 +744,7 @@ async function runSetupPipeline(app, htmlPath, pending, onProgress, layers, sett
 	// fetch-if-missing behaviour rather than silently skipping the template).
 	const r = await ensureTemplate(app, settings || {}, onProgress);
 	if (r === "kept-local") problems.push(`Your edited ${TEMPLATE_PATH} was kept — delete it to take the ${VAULT_TAG} version.`);
+	if (r === "kept-unverified") problems.push(`The ${VAULT_TAG} search template didn't match this release's checksum, so your current one was kept.`);
 	onProgress?.("Building the search page…");
 	const built = await buildSearchIndex(app, htmlPath, onProgress, layers);
 	return { built, problems };
@@ -881,6 +995,23 @@ async function readCommentaryIndexMeta(app) {
 		if (!(await adapter.exists(normalizePath(CMINDEX_PACK_PATH)))) return null;
 		const meta = JSON.parse(await adapter.read(metaPath));
 		if (!meta || !meta.n) return null;
+		/* A block's id is its POSITION in the index, so an index built against a
+		 * different set of cm-*.json files does not degrade — it points at the wrong
+		 * passage, and looks entirely healthy doing it. Same guard as the Node
+		 * builder: sha256 of "name:size" over the cm-* set, in numeric order, and the
+		 * tab turns itself off when the commentary has moved on without the index. */
+		if (meta.src) {
+			const folder = app.vault.getAbstractFileByPath(normalizePath(DATA_PATH));
+			const cm = (folder && Array.isArray(folder.children) ? folder.children : [])
+				.filter((f) => f instanceof TFile && /^cm-\d+\.json$/.test(f.name))
+				.sort((a, b) => +a.name.match(/\d+/)[0] - +b.name.match(/\d+/)[0]);
+			const listing = cm.map((f) => `${f.name}:${f.stat.size}`).join("\n");
+			const src = (await sha256Hex(new TextEncoder().encode(listing))).slice(0, 16);
+			if (src !== meta.src) {
+				console.warn("Bible Search: cmx.json is stale — the commentary changed since it was indexed; Commentary search off");
+				return null;
+			}
+		}
 		/* `cov` — blocks, books and licence per commentator — is what the tab's
 		 * opening card is drawn from: with an empty box the Commentary tab
 		 * introduces each source, and a source has to be sized and licensed there
@@ -898,7 +1029,7 @@ async function readCommentaryIndexMeta(app) {
  * Validates the shape before writing so a stray 404 HTML body can't land as data;
  * returns the number of calendar days written. */
 async function downloadOnThisDayPack(app) {
-	const res = await requestUrl({ url: ONTHISDAY_PACK_URL, throw: false });
+	const res = await fetchPinned(ONTHISDAY_PACK_URL);
 	const status = res.status ?? 200;
 	if (status >= 400) throw new Error(`On This Day pack not available (HTTP ${status}).`);
 	let pack;
@@ -945,7 +1076,7 @@ async function buildChurchHistoryFromVault(app) {
  * Validates the { eras, families, nodes } shape before writing; returns the
  * number of tree nodes written. */
 async function downloadChurchHistoryPack(app) {
-	const res = await requestUrl({ url: CHURCHHISTORY_PACK_URL, throw: false });
+	const res = await fetchPinned(CHURCHHISTORY_PACK_URL);
 	const status = res.status ?? 200;
 	if (status >= 400) throw new Error(`Church History pack not available (HTTP ${status}).`);
 	let pack;
@@ -974,7 +1105,7 @@ async function downloadChurchHistoryPack(app) {
 const lexShapeOk = (p) => Array.isArray(p) && p.length > 1000 &&
 	p.every((r) => Array.isArray(r) && r.length === 8 && /^[GH]\d+$/.test(r[0]));
 async function downloadLexiconPack(app) {
-	const res = await requestUrl({ url: LEXICON_PACK_URL, throw: false });
+	const res = await fetchPinned(LEXICON_PACK_URL);
 	const status = res.status ?? 200;
 	if (status >= 400) throw new Error(`Dictionary pack not available (HTTP ${status}).`);
 	let pack;
@@ -1021,9 +1152,13 @@ const journeysShapeOk = (d) => !!d && Array.isArray(d.j) && d.j.length > 0 &&
 	d.j.every((j) => j && typeof j.name === "string" && Array.isArray(j.stops) && j.stops.length > 1 &&
 		j.stops.every((st) => st && typeof st.n === "string" && Number.isFinite(st.lat) && Number.isFinite(st.lon)));
 // The tribal allotments: at least one, every located place carrying a coordinate.
+// Chapter and verse are pasted into the page's markup and data-* attributes, so they
+// are held to whole numbers here as well as escaped there.
 const allotmentsShapeOk = (d) => !!d && Array.isArray(d.a) && d.a.length > 0 &&
-	d.a.every((x) => x && typeof x.tribe === "string" && Array.isArray(x.points) && x.points.length > 0 &&
-		x.points.every((pt) => pt && typeof pt.n === "string" && Number.isFinite(pt.lat) && Number.isFinite(pt.lon)));
+	d.a.every((x) => x && typeof x.tribe === "string" && Number.isInteger(x.ch) &&
+		Array.isArray(x.points) && x.points.length > 0 &&
+		x.points.every((pt) => pt && typeof pt.n === "string" && Number.isFinite(pt.lat) && Number.isFinite(pt.lon) &&
+			(pt.v === undefined || Number.isInteger(pt.v))));
 // The two located history layers. Either may be empty on a vault whose calendar or
 // tree was trimmed, so the gate is the row SHAPE rather than the row count.
 const hmRowOk = (r, latAt) => Array.isArray(r) && Number.isFinite(r[latAt]) && Number.isFinite(r[latAt + 1]);
@@ -1043,7 +1178,7 @@ const historyMapShapeOk = (d) => !!d && Array.isArray(d.ch) && Array.isArray(d.o
 
 async function downloadMapsPack(app) {
 	const fetchJsonPack = async (url, label) => {
-		const res = await requestUrl({ url, throw: false });
+		const res = await fetchPinned(url);
 		const status = res.status ?? 200;
 		if (status >= 400) throw new Error(`${label} not available (HTTP ${status}).`);
 		try { return res.json ?? JSON.parse(res.text); }
@@ -1073,7 +1208,7 @@ async function downloadMapsPack(app) {
  * and repaired by pressing the button again. Writing the index first would instead
  * leave a shelf of plates that open onto an error. */
 async function downloadPlatesPack(app) {
-	const res = await requestUrl({ url: PLATES_INDEX_URL, throw: false });
+	const res = await fetchPinned(PLATES_INDEX_URL);
 	const status = res.status ?? 200;
 	if (status >= 400) throw new Error(`Plates pack not available (HTTP ${status}).`);
 	let index;
@@ -1083,7 +1218,7 @@ async function downloadPlatesPack(app) {
 
 	await ensureFolder(app, normalizePath(DATA_PATH));
 	for (const p of index.plates) {
-		const r = await requestUrl({ url: platePartUrl(p.i), throw: false });
+		const r = await fetchPinned(platePartUrl(p.i));
 		const st = r.status ?? 200;
 		if (st >= 400) throw new Error(`Plate ${p.i} not available (HTTP ${st}) — nothing added.`);
 		let body;
@@ -1104,7 +1239,7 @@ async function downloadPlatesPack(app) {
  * folder. A note that already exists is left alone, so a re-download never clobbers
  * a prayer the user has edited. Returns the number of notes actually written. */
 async function downloadPrayersPack(app) {
-	const res = await requestUrl({ url: PRAYERS_PACK_URL, throw: false });
+	const res = await fetchPinned(PRAYERS_PACK_URL);
 	const status = res.status ?? 200;
 	if (status >= 400) throw new Error(`Prayers pack not available (HTTP ${status}).`);
 	let pack;
@@ -2120,7 +2255,9 @@ class BibleSearchView extends ItemView {
 		const win = iframe.contentWindow;
 		if (win) {
 			win.bibleSearchLoadData = async (id) => {
-				if (!PAYLOAD_ID.test(id)) throw new Error("Unknown payload: " + id);
+				// typeof first: test() and the template literal below each call toString(),
+				// and an object can answer them differently.
+				if (typeof id !== "string" || !PAYLOAD_ID.test(id)) throw new Error("Unknown payload: " + String(id).slice(0, 40));
 				const p = normalizePath(`${DATA_PATH}/${id}.json`);
 				const f = this.app.vault.getAbstractFileByPath(p);
 				if (!(f instanceof TFile)) {
@@ -2846,6 +2983,7 @@ class BibleSearchPlugin extends Plugin {
 			// template-side fix to someone who installed months ago.
 			const t = await ensureTemplate(this.app, this.settings, (m) => notice.setMessage(m));
 			if (t === "updated" || t === "adopted" || t === "written") await this.saveSettings();
+			if (t === "kept-unverified") new Notice(`The ${VAULT_TAG} search template didn't match this release's checksum, so your current one was kept.`, 10000);
 			const r = await buildSearchIndex(this.app, this.settings.htmlPath, (m) => notice.setMessage(m), this.settings.layers);
 			notice.hide();
 			const extras = [
@@ -2927,6 +3065,7 @@ module.exports.BibleSearchView = BibleSearchView;
 module.exports.BibleSearchSettingTab = BibleSearchSettingTab;
 module.exports.__testables = {
 	BOOK_ORDER, BOOK_IDS, DOWNLOADABLE, HELLOAO_API, TEMPLATE_PATH, PAYLOAD_ID,
+	VAULT_TAG, RAW, PINNED_SHA256, sha256Js, sha256Hex, fetchPinned, ensureTemplate, readCommentaryIndexMeta,
 	apiVerseText, toParagraphs, fmValue, fmList, isHub, firstHeading, firstUrl, safeUrl,
 	LINK_MARK, stripLinks,
 	collectNotesFromVault, buildOnThisDayFromVault, CONTENT_LAYERS, layerEnabled,
