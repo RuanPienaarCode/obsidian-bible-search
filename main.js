@@ -301,9 +301,9 @@ const DOWNLOADABLE = [
 // without having been part of a reviewed release. Both are written by
 // tools/pin-release.js from the tag itself.
 // BEGIN PINNED — written by tools/pin-release.js; never edit by hand
-const VAULT_TAG = "v1.2.43";
+const VAULT_TAG = "v1.2.44";
 const PINNED_SHA256 = {
-	"Bible/bible-search-template.html": "2629b1a9407abfe86ef48dc9f6adb098fb6de43f90868807c3e2df28ae5cc105",
+	"Bible/bible-search-template.html": "62c1a8fc2d67d286fa014fd9e57f16eda10eb00cddbab378dd42014458d79910",
 	"data/allotments.json": "8fa44d7c48c9700752cf49e4847778a169d7745d546011093af2917ffdc779b7",
 	"data/basemap-world.json": "6115947df678db8eec0ff99ea3ac302ca77a80aa150c1b84e2b5650a2f09c1f1",
 	"data/basemap.json": "de8d45688d51228f1ef92aebd7083b2bbd4582c612fa951c64711f9465974576",
@@ -510,6 +510,21 @@ async function fetchJson(url) {
 		} catch (e) { lastErr = e; }
 	}
 	throw lastErr;
+}
+
+// fn over every item with at most `limit` calls in flight; results keep the items'
+// order whatever order the calls finish in.
+async function mapPool(items, limit, fn) {
+	const out = new Array(items.length);
+	let next = 0;
+	const worker = async () => {
+		while (next < items.length) {
+			const i = next++;
+			out[i] = await fn(items[i], i);
+		}
+	};
+	await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+	return out;
 }
 
 // Idempotent vault writes: never overwrite, so a re-run or a racing device
@@ -1301,18 +1316,22 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 	const data = {};
 	for (const t of translations) {
 		onProgress?.(`Indexing ${t}…`);
-		const rows = [];
 		const list = chapterFiles.get(t).sort((a, b) => a.bi - b.bi || a.ch - b.ch);
-		for (const { bi, ch, file } of list) {
-			const lines = (await vault.cachedRead(file)).split("\n");
-			for (const line of lines) {
+		// Sixteen reads in flight rather than one: awaiting ~1,200 chapter files in
+		// turn made every rebuild wait on each vault read, the long pole on a phone
+		// syncing through iCloud. Each file is parsed as it arrives, so only its rows
+		// are held; mapPool keeps them in canonical order.
+		const perChapter = await mapPool(list, 16, async ({ bi, ch, file }) => {
+			const rows = [];
+			for (const line of (await vault.cachedRead(file)).split("\n")) {
 				const m = line.match(VERSE_RE);
 				if (!m) continue;
 				const text = m[2].replace(/\s+/g, " ").trim();
 				if (text) rows.push([bi, ch, +m[1], text]);
 			}
-		}
-		data[t] = rows;
+			return rows;
+		});
+		data[t] = [].concat(...perChapter);
 	}
 
 	// Content layers — each folder run through the shared collector, same as the Node
@@ -3065,7 +3084,7 @@ module.exports.BibleSearchView = BibleSearchView;
 module.exports.BibleSearchSettingTab = BibleSearchSettingTab;
 module.exports.__testables = {
 	BOOK_ORDER, BOOK_IDS, DOWNLOADABLE, HELLOAO_API, TEMPLATE_PATH, PAYLOAD_ID,
-	VAULT_TAG, RAW, PINNED_SHA256, sha256Js, sha256Hex, fetchPinned, ensureTemplate, readCommentaryIndexMeta,
+	VAULT_TAG, RAW, PINNED_SHA256, sha256Js, sha256Hex, fetchPinned, ensureTemplate, readCommentaryIndexMeta, mapPool,
 	apiVerseText, toParagraphs, fmValue, fmList, isHub, firstHeading, firstUrl, safeUrl,
 	LINK_MARK, stripLinks,
 	collectNotesFromVault, buildOnThisDayFromVault, CONTENT_LAYERS, layerEnabled,

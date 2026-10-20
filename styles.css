@@ -49,6 +49,7 @@
 	background: var(--background-primary-alt);
 	border: 1px solid var(--background-modifier-border);
 	border-radius: var(--radius-s);
+	-webkit-user-select: all;
 	user-select: all;
 }
 
