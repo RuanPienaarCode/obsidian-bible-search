@@ -301,9 +301,9 @@ const DOWNLOADABLE = [
 // without having been part of a reviewed release. Both are written by
 // tools/pin-release.js from the tag itself.
 // BEGIN PINNED — written by tools/pin-release.js; never edit by hand
-const VAULT_TAG = "v1.2.44";
+const VAULT_TAG = "v1.2.45";
 const PINNED_SHA256 = {
-	"Bible/bible-search-template.html": "62c1a8fc2d67d286fa014fd9e57f16eda10eb00cddbab378dd42014458d79910",
+	"Bible/bible-search-template.html": "a4d0a38281d2cc1dc561539dc127ff631834d56a8980deaebae8e9ab8cf208b6",
 	"data/allotments.json": "8fa44d7c48c9700752cf49e4847778a169d7745d546011093af2917ffdc779b7",
 	"data/basemap-world.json": "6115947df678db8eec0ff99ea3ac302ca77a80aa150c1b84e2b5650a2f09c1f1",
 	"data/basemap.json": "de8d45688d51228f1ef92aebd7083b2bbd4582c612fa951c64711f9465974576",
@@ -1390,17 +1390,17 @@ async function buildSearchIndex(app, htmlPath, onProgress, layers) {
 		// the full dictionary). Only "lx" speaks in the footer prose.
 		{ id: "lx", data: LEXICON,   n: LEX_N,           foot: (n) => `a Hebrew and Greek dictionary (${n.toLocaleString()} words)`, noun: "a Hebrew and Greek dictionary" },
 		{ id: "wd", data: WORDS,     n: WORDS.length,    foot: () => "",                                    noun: "" },
+		{ id: "td", data: TOPICS,    n: TOPICS.length,   foot: (n) => `${n} topics`,                         noun: "topics" },
+		{ id: "fd", data: FAQ,       n: FAQ.length,      foot: (n) => `${n} FAQ answers`,                    noun: "FAQ answers" },
 		// "cx" is the commentary index's counts; the index itself is the cmx.json
 		// sidecar, exactly like the dictionary above.
 		{ id: "cx", data: CMINDEX,   n: CM_N,           foot: (n) => `searchable commentary (${n.toLocaleString()} passages)`, noun: "searchable commentary" },
-		{ id: "ad", data: ARTICLES,  n: ARTICLES.length, foot: (n) => `${n} teaching articles`,             noun: "teaching articles" },
-		{ id: "td", data: TOPICS,    n: TOPICS.length,   foot: (n) => `${n} topics`,                         noun: "topics" },
-		{ id: "fd", data: FAQ,       n: FAQ.length,      foot: (n) => `${n} FAQ answers`,                    noun: "FAQ answers" },
 		{ id: "hd", data: HISTORY,   n: HISTORY.length,  foot: (n) => `${n} Bible-history notes`,            noun: "Bible history" },
-		// Ordered to match the template's tab strip: Church History, then On This Day, then Prayers.
+		// Same order as the template's tab strip (tools/check-drift.js holds it there).
 		{ id: "cd", data: CHURCHHISTORY, n: CH_NODES,    foot: (n) => `a Church History family tree (${n} branches)`, noun: "a Church History family tree" },
 		{ id: "od", data: ONTHISDAY, n: OTD_DAYS,        foot: (n) => `an On This Day calendar (${n} days)`, noun: "an On This Day calendar" },
 		{ id: "pd", data: PRAYERS,   n: PRAYERS.length,  foot: (n) => `${n} prayers`,                        noun: "prayers" },
+		{ id: "ad", data: ARTICLES,  n: ARTICLES.length, foot: (n) => `${n} teaching articles`,             noun: "teaching articles" },
 	];
 	const presentLayers = LAYERS.filter((l) => l.n > 0);
 	const andJoin = (arr) => arr.length <= 1 ? (arr[0] || "")

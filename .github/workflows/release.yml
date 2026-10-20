@@ -27,6 +27,22 @@ jobs:
             exit 1
           fi
 
+      # main.js is hand-written and copied between three repos; the deliberate
+      # /* nosourcemap */ tail has doubled three times by accident and shipped that
+      # way twice, because comparing the copies to each other cannot see it.
+      - name: Verify main.js ends with exactly one nosourcemap marker
+        run: |
+          COUNT=$(grep -c nosourcemap main.js || true)
+          if [ "$COUNT" != "1" ]; then
+            echo "main.js carries $COUNT nosourcemap markers; it must carry exactly one." >&2
+            exit 1
+          fi
+          printf '};\n\n/* nosourcemap */\n' > "$RUNNER_TEMP/tail"
+          if ! tail -c "$(wc -c < "$RUNNER_TEMP/tail")" main.js | cmp -s - "$RUNNER_TEMP/tail"; then
+            echo "main.js must end with the canonical tail: };\n\n/* nosourcemap */\n" >&2
+            exit 1
+          fi
+
       # Lets anyone verify the shipped assets came from this repo and this
       # workflow: `gh attestation verify main.js -R RuanPienaarCode/obsidian-bible-search`
       - name: Attest release assets
