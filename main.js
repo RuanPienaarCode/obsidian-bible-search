@@ -2220,6 +2220,14 @@ class OnboardingWizard extends Modal {
 	}
 }
 
+/* Opening a passage from outside — api.openPassage() and obsidian://bible-search —
+ * waits for the page to mount. A first open on a phone reads ~2 MB from an iCloud
+ * vault before the frame can load, so the wait is generous; past it, the caller is
+ * told rather than left hanging. A reference is a few dozen characters: anything
+ * past REF_MAX is refused before it reaches the page's parser. */
+const PAGE_WAIT_MS = 30000;
+const REF_MAX = 100;
+
 class BibleSearchView extends ItemView {
 	constructor(leaf, plugin) {
 		super(leaf);
@@ -2227,6 +2235,7 @@ class BibleSearchView extends ItemView {
 		this.frame = null;
 		this.renderGen = 0; // bumped per render / on close to invalidate stale in-flight reads
 		this.fitObserver = null; // keeps the iframe filling the leaf as it resizes
+		this._pageWaiters = []; // pageWindow() calls waiting for the frame to mount
 	}
 
 	/* Give the flex-column view a definite height taken from the leaf's own
@@ -2296,6 +2305,8 @@ class BibleSearchView extends ItemView {
 			const box = container.createDiv({ cls: "bible-search-error" });
 			box.createEl("h3", { text: title });
 			for (const line of detail) box.createEl("p", { text: line });
+			// No frame is coming, so a passage waiting on one is told why now.
+			this.settlePage(new Error(`${title} — ${detail[0]}`));
 		};
 
 		const path = this.plugin.settings.htmlPath;
@@ -2352,9 +2363,7 @@ class BibleSearchView extends ItemView {
 		const iframe = container.createEl("iframe", { cls: "bible-search-frame", attr: { title: "Bible Search" } });
 		iframe.addEventListener("load", () => {
 			if (gen !== this.renderGen) return; // superseded between src-set and load
-			this.frame = iframe;
-			this.wireBridge(iframe);
-			this.syncTheme();
+			this.frameLoaded(iframe);
 		});
 		iframe.src = blobUrl;
 
@@ -2363,6 +2372,43 @@ class BibleSearchView extends ItemView {
 		this.fitFrame();
 		this.fitObserver = new ResizeObserver(() => this.fitFrame());
 		this.fitObserver.observe(this.containerEl);
+	}
+
+	// The page has run its own script: wire the host in, then let anyone waiting on
+	// pageWindow() through — after the bridge, so a passage opened the moment the
+	// wait ends can already load its verse text.
+	frameLoaded(iframe) {
+		this.frame = iframe;
+		this.wireBridge(iframe);
+		this.syncTheme();
+		this.settlePage(null, iframe.contentWindow);
+	}
+
+	/* Resolves with the page's window once this view's frame has mounted — at once
+	 * when it already has. A render in flight (the view has just opened, or a rebuild
+	 * is re-mounting it) is waited out, not raced: render() clears this.frame before
+	 * it reads, so a frame present here is the live one. Rejects when the render ends
+	 * in an error box, the view closes first, or nothing mounts within PAGE_WAIT_MS. */
+	pageWindow(timeoutMs = PAGE_WAIT_MS) {
+		const win = this.frame && this.frame.contentWindow;
+		if (win) return Promise.resolve(win);
+		return new Promise((resolve, reject) => {
+			const waiter = {
+				settle: (err, w) => { window.clearTimeout(timer); if (err) reject(err); else resolve(w); },
+			};
+			const timer = window.setTimeout(() => {
+				this._pageWaiters = this._pageWaiters.filter((x) => x !== waiter);
+				reject(new Error("Bible Search took too long to load — try again in a moment."));
+			}, timeoutMs);
+			this._pageWaiters.push(waiter);
+		});
+	}
+
+	// Hand the mounted page, or the reason there is none, to everything waiting on it.
+	settlePage(err, win) {
+		const waiting = this._pageWaiters;
+		this._pageWaiters = [];
+		for (const w of waiting) w.settle(err, win);
 	}
 
 	// Match the app rather than the OS — inside Obsidian, Obsidian's theme is the truth.
@@ -2505,6 +2551,7 @@ class BibleSearchView extends ItemView {
 		window.clearTimeout(this._prefetchTimer);
 		this._prefetchTimer = null;
 		this.releaseBlob();
+		this.settlePage(new Error("Bible Search was closed before the passage opened."));
 	}
 }
 
@@ -2964,6 +3011,15 @@ class BibleSearchPlugin extends Plugin {
 			callback: () => this.rebuildIndex(),
 		});
 
+		/* The two supported ways in from outside, both onto openPassage():
+		     obsidian://bible-search?ref=John%2015:5   links in notes, other apps
+		     app.plugins.plugins["bible-search"].api   other plugins in this vault
+		   The api object is frozen so one caller can't swap a method out from under
+		   another. Callers should look it up per use rather than hold it: a disabled
+		   plugin's object stays behind, and its openPassage then answers false. */
+		this.api = Object.freeze({ version: 1, openPassage: (ref) => this.openPassage(ref) });
+		this.registerObsidianProtocolHandler("bible-search", (params) => this.openFromUri(params));
+
 		this.addSettingTab(new BibleSearchSettingTab(this.app, this));
 
 		// First-run wizard / interrupted-setup resume, after layout-ready so the
@@ -3008,6 +3064,7 @@ class BibleSearchPlugin extends Plugin {
 		// against views that are already gone.
 		clearTimeout(this._refreshTimer);
 		this.releaseHtmlBlob();
+		this._unloaded = true;   // an api object someone kept now answers false
 	}
 
 	// ── Shared Blob-URL cache for the generated HTML ─────────────────────────
@@ -3137,6 +3194,7 @@ class BibleSearchPlugin extends Plugin {
 		}
 	}
 
+	// Resolves with the leaf it revealed, so openPassage() can reach its view.
 	async activateView() {
 		const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE);
 		if (existing.length > 0) {
@@ -3144,11 +3202,58 @@ class BibleSearchPlugin extends Plugin {
 			// awaited so the view is actually live when this resolves, and so a
 			// rejection surfaces here instead of as an unhandled promise.
 			await this.app.workspace.revealLeaf(existing[0]);
-			return;
+			return existing[0];
 		}
 		const leaf = this.app.workspace.getLeaf(true);
 		await leaf.setViewState({ type: VIEW_TYPE, active: true });
 		await this.app.workspace.revealLeaf(leaf);
+		return leaf;
+	}
+
+	/* Open a passage in the reader: "John 15:5", "1 Cor 13:4-7", "john 3 16",
+	 * "Psalm 23". The reference is read by the PAGE's own parseRef — the one behind
+	 * the search box — so whatever a reader can type there opens here, and no second
+	 * parser exists to drift from it. It opens in the translation the page is showing,
+	 * at the first verse named, with that verse's study card open; a bare chapter
+	 * opens at its top.
+	 *
+	 * Resolves true once the reader is on the passage. Resolves false, having opened
+	 * nothing, when this vault has no search page yet — a caller's cue to fall back
+	 * to whatever it does without Bible Search. Throws, with a message meant for a
+	 * person, when the page is there but can't open this reference. */
+	async openPassage(ref) {
+		if (typeof ref !== "string" || !ref.trim()) throw new TypeError('openPassage takes a reference string, such as "John 15:5".');
+		if (this._unloaded || !this.hasData()) return false;
+		const text = ref.trim();
+		const notARef = () => new Error(`"${text.slice(0, 60)}" isn't a Bible reference — try one like "John 15:5".`);
+		if (text.length > REF_MAX) throw notARef();
+		const leaf = await this.activateView();
+		const view = leaf && leaf.view;
+		if (!(view instanceof BibleSearchView)) throw new Error("The Bible Search view didn't open.");
+		const win = await view.pageWindow();
+		// Function declarations in the page's script, so they are properties of its
+		// window. A search page built from a template older than these has none.
+		if (typeof win.parseRef !== "function" || typeof win.openVerse !== "function" || typeof win.chosenTrans !== "function") {
+			throw new Error('This search page can\'t open passages yet — run "Bible Search: Rebuild search index".');
+		}
+		const r = win.parseRef(text);
+		if (!r || !(r.bi >= 0)) throw notARef();
+		await win.openVerse(win.chosenTrans(), r.bi, r.ch, r.v1);
+		return true;
+	}
+
+	// obsidian://bible-search?ref=… — no ref just opens Bible Search, like the ribbon.
+	// A link has no caller to hand an error to, so every outcome is said in a Notice.
+	async openFromUri(params) {
+		const ref = params && typeof params.ref === "string" ? params.ref : "";
+		try {
+			if (!ref.trim()) { await this.activateView(); return; }
+			if (!(await this.openPassage(ref))) {
+				new Notice('Bible Search isn\'t set up in this vault yet — run "Bible Search: Run setup wizard".', 8000);
+			}
+		} catch (e) {
+			new Notice("Bible Search: " + (e && e.message ? e.message : e), 8000);
+		}
 	}
 
 	refreshViews() {

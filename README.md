@@ -58,6 +58,46 @@ another device, it adopts the existing page without rebuilding.
 - `Bible Search: Rebuild search index` — after editing vault content
 - `Bible Search: Run setup wizard` — add translations, move the page
 
+## Opening a passage from elsewhere
+
+Two supported ways in. Both open the passage in the reader, and both read the reference
+exactly as the search box does: `John 15:5`, `1 Cor 13:4-7`, `john 3 16`, `Ps 23`,
+`Song of Solomon 2:4`. It opens in the translation the page is showing, at the first verse
+named, with that verse's study card open. A bare chapter opens at its top.
+
+**A link**, in a note, a browser or another app:
+
+```
+obsidian://bible-search?ref=John%2015:5
+```
+
+Add `&vault=<name>` to choose the vault, as with any Obsidian link. With no `ref` it just
+opens Bible Search. Anything that goes wrong is shown in a notice.
+
+**Another plugin** in the same vault:
+
+```js
+const bs = app.plugins.plugins["bible-search"];
+if (bs && bs.api && bs.api.openPassage) {
+  try {
+    if (await bs.api.openPassage("John 15:5")) return;   // the reader is on the passage
+  } catch (e) {
+    new Notice(e.message);   // set up, but this reference couldn't be opened
+    return;
+  }
+}
+// not installed, or not set up in this vault: fall back
+```
+
+| | |
+| --- | --- |
+| `api.version` | `1`. Moves only if `openPassage` changes in a way that breaks a caller. |
+| `api.openPassage(ref)` | Returns a promise. `true` once the reader shows the passage. `false`, with nothing opened, when this vault has no search page yet: your cue to fall back. Rejects with an `Error` worded for the reader when the page is there but can't open the reference; the view stays open. A `ref` that isn't a non-empty string is a `TypeError`, thrown before anything opens. |
+
+Look the plugin up on each use rather than keeping `api`. After Bible Search is disabled
+or reloaded, an `api` kept from before answers `false`. If a translation's text can't be
+read yet (still syncing, say), the reader says so itself.
+
 ## Network
 
 Two hosts, only during setup or a rebuild. Never on a schedule.
