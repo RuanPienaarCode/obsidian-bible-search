@@ -855,16 +855,33 @@ function fmList(fm, key) {
 }
 /* A [[wikilink]] survives into the payload as a link MARKER — \u0001target\u0002alias\u0003 —
  * instead of being flattened to its alias text, so the reader can turn it back into a real
- * anchor. Verbatim twin of build-bible-search.js; the marker format is a contract with the
- * template's stripLinks()/noteSegments(). Anything that INDEXES or EXCERPTS a body must run
+ * anchor. BLOCK MARKERS use the same trick one range up: a paragraph may OPEN with a prefix
+ * naming its kind, and one without is prose —
+ *   \u0004<level><text>          heading, level "2".."6" as written in the markdown
+ *   \u0005<depth><kind><text>    list item, depth "0".."9", kind "u"nordered / "o"rdered
+ *   \u0006<kind><cell>\u0007<cell>…  table row, kind "h"eader / "d"ata
+ * Verbatim twin of build-bible-search.js (tools/builder-parity.test.js holds the two to
+ * byte-identical output); both formats are a contract with the template's stripLinks(),
+ * noteSegments() and renderNoteBody(). Anything that INDEXES or EXCERPTS a body must run
  * it through stripLinks() first. */
 const LINK_MARK = (target, alias) => "\u0001" + target + "\u0002" + alias + "\u0003";
-const stripLinks = (s) => String(s).replace(/\u0001([^\u0001\u0002\u0003]*)\u0002([^\u0001\u0002\u0003]*)\u0003/g, "$2");
+const B_HEAD = "\u0004", B_ITEM = "\u0005", B_ROW = "\u0006", B_CELL = "\u0007";
+// The plain-text view of a body: no link targets, no block scaffolding. Cells are joined
+// with " · " rather than run together, so a flattened table row still reads as a row.
+const stripLinks = (s) => String(s)
+	.replace(/\u0001([^\u0001\u0002\u0003]*)\u0002([^\u0001\u0002\u0003]*)\u0003/g, "$2")
+	.replace(/\u0007/g, " · ")
+	.replace(/^(?:\u0004[2-6]|\u0005[0-9][uo]|\u0006[hd])/gm, "");
+// An article's markdown body as reading paragraphs (joined by "\n"): drops the breadcrumb,
+// the excerpt callout and horizontal rules; keeps prose, headings, lists and tables.
 function toParagraphs(body) {
 	// A wikilink with an empty alias ("[[Faith|]]") has no display text — drop it rather
-	// than emit a marker whose anchor would render as nothing to click.
+	// than emit a marker whose anchor would render as nothing to click. A target ending in
+	// a backslash (an escaped table pipe that reached here some other way) resolves to no
+	// note while looking healthy, so the backslash is stripped.
 	const wiki = (target, alias) => {
-		const t = target.replace(/\s+/g, " ").trim(), a = alias.replace(/\s+/g, " ").trim();
+		const t = target.replace(/\s+/g, " ").trim().replace(/\\+$/, "").trim();
+		const a = alias.replace(/\s+/g, " ").trim();
 		return t && a ? LINK_MARK(t, a) : a;
 	};
 	const clean = (s) => s
@@ -875,21 +892,86 @@ function toParagraphs(body) {
 		.replace(/\[([^\]]*)\]\((?:\\.|[^)\\])*\)/g, "$1")
 		.replace(/[*_`]/g, "")
 		.replace(/\s+/g, " ").trim();
+	// A wikilink inside a table cell escapes its pipe ("[[Genesis 9 (ESV)#^11\|Genesis 9:11]]")
+	// or the cell would split mid-link. Park the escaped ones on a character prose cannot
+	// contain, split, then put them back BEFORE clean() runs. No lookbehind: iOS 15 WebKit.
+	const cells = (row) => row.replace(/^\s*\|/, "").replace(/\|\s*$/, "")
+		.replace(/\\\|/g, "\u0000").split("|")
+		.map((c) => clean(c.replace(/\u0000/g, "|")));
+	const isDivider = (cs) => cs.length > 0 && cs.every((c) => /^:?-{1,}:?$/.test(c));
+	// Tabs indent as far as four spaces, which is how Obsidian writes them.
+	const indentOf = (s) => (s.match(/^[ \t]*/)[0].replace(/\t/g, "    ")).length;
+	const ITEM_RE = /^([-*+]|\d+[.)])\s+(.*)$/;
+
 	const lines = body.split("\n");
 	const paras = [];
 	let buf = [], inCallout = false;
+	let tbl = [];        // raw rows of the table being read, emitted when it ends
+	let stack = null;    // indent widths of the list being read, one per open depth
 	const flush = () => { if (buf.length) { const p = clean(buf.join(" ")); if (p) paras.push(p); buf = []; } };
+	// A table is emitted whole: its first row is a HEADER only if the second row is the
+	// "| --- |" divider, which cannot be known while the first row is being read.
+	const flushTable = () => {
+		if (!tbl.length) return;
+		const rows = tbl.map(cells);
+		tbl = [];
+		const head = rows.length > 1 && isDivider(rows[1]) ? rows.shift() : null;
+		if (head) { rows.shift(); paras.push(B_ROW + "h" + head.join(B_CELL)); }
+		for (const r of rows) {
+			if (isDivider(r)) continue;                 // a stray divider is scaffolding, not content
+			if (r.some(Boolean)) paras.push(B_ROW + "d" + r.join(B_CELL));
+		}
+	};
+	const flushList = () => { stack = null; };
+	const flushAll = () => { flush(); flushTable(); flushList(); };
+
 	for (const line of lines) {
 		const t = line.trim();
-		if (t === "") { inCallout = false; flush(); continue; }
-		if (/^Part of\b/.test(t)) continue;
-		if (/^#\s+/.test(t)) { flush(); continue; }
-		if (/^#{2,6}\s+/.test(t)) { flush(); const h = clean(t.replace(/^#{2,6}\s+/, "")); if (h) paras.push(h); continue; }
-		if (/^>\s*\[!/.test(t)) { inCallout = true; continue; }
+		if (t === "") { inCallout = false; flushAll(); continue; }
+		if (/^Part of\b/.test(t)) continue;                       // breadcrumb line
+		// A "---" rule is furniture between a body and its footer link; left in, it joins
+		// the line under it and reaches the page as literal "--- ← On This Day index".
+		if (/^(?:-{3,}|\*{3,}|_{3,})$/.test(t)) { flushAll(); continue; }
+		if (/^#\s+/.test(t)) { flushAll(); continue; }             // H1 = the title, already shown
+		if (/^#{2,6}\s+/.test(t)) {
+			flushAll();
+			const lv = t.match(/^#{2,6}/)[0].length;
+			const h = clean(t.replace(/^#{2,6}\s+/, ""));
+			if (h) paras.push(B_HEAD + lv + h);
+			continue;
+		}
+		if (/^>\s*\[!/.test(t)) { inCallout = true; continue; }     // callout header → skip its block
 		if (inCallout) { if (/^>/.test(t)) continue; inCallout = false; }
-		buf.push(t.replace(/^>\s?/, ""));
+		const bare = t.replace(/^>\s?/, "");
+		// A table row. Requires a leading pipe, so prose that merely contains one stays prose.
+		if (/^\|/.test(bare)) { flush(); flushList(); tbl.push(bare); continue; }
+		const item = bare.match(ITEM_RE);
+		if (item) {
+			flush(); flushTable();
+			// Depth comes from the indent STACK, not from dividing by a guessed step: vault
+			// notes indent nested bullets by two spaces, by four, and by a tab.
+			const w = indentOf(line);
+			if (!stack) stack = [w];
+			else {
+				while (stack.length > 1 && w < stack[stack.length - 1]) stack.pop();
+				if (w > stack[stack.length - 1]) stack.push(w);
+			}
+			const depth = Math.min(9, stack.length - 1);
+			const kind = /^\d/.test(item[1]) ? "o" : "u";
+			const txt = clean(item[2]);
+			if (txt) paras.push(B_ITEM + depth + kind + txt);
+			continue;
+		}
+		// An indented line under a bullet continues that bullet rather than starting a paragraph.
+		if (stack && indentOf(line) > 0 && paras.length && paras[paras.length - 1][0] === B_ITEM) {
+			const add = clean(bare);
+			if (add) paras[paras.length - 1] += " " + add;
+			continue;
+		}
+		flushTable(); flushList();
+		buf.push(bare);                                           // blockquote prose reads as normal text
 	}
-	flush();
+	flushAll();
 	return paras;
 }
 const isHub = (fm) =>
@@ -898,6 +980,18 @@ const isHub = (fm) =>
 const firstHeading = (body) => (body.match(/^#\s+(.+)$/m) || [, ""])[1].trim();
 const firstUrl = (body) => (body.match(/\((https?:\/\/[^)\s]+)\)/) || [, ""])[1];
 const safeUrl = (u) => (/^https?:\/\//i.test(u || "") ? u : "");
+
+/* The order the Node builder's walkMd() visits two notes in: folder by folder, each
+ * level's entries sorted by name. Comparing whole paths is not the same — "Alpha/x.md"
+ * sorts after its sibling "Alpha Beta.md" as a path ("/" > " "), but the folder "Alpha"
+ * sorts before it as a name — and the row order is part of the payload. */
+function walkOrder(a, b) {
+	const pa = a.split("/"), pb = b.split("/");
+	for (let i = 0; i < Math.min(pa.length, pb.length); i++) {
+		if (pa[i] !== pb[i]) return pa[i].localeCompare(pb[i]);
+	}
+	return pa.length - pb.length;
+}
 
 /* Vault-API twin of the Node builder's collectNotes(). Indexes every .md under a
  * folder into the shared record shape — the Articles, Topics, FAQ and History
@@ -911,7 +1005,7 @@ async function collectNotesFromVault(app, prefix, sourceOf) {
 	const under = prefix + "/";
 	const files = app.vault.getMarkdownFiles()
 		.filter((f) => f.path.startsWith(under) && !/^readme$/i.test(f.basename))
-		.sort((a, b) => a.path.localeCompare(b.path));
+		.sort((a, b) => walkOrder(a.path, b.path));
 	for (const f of files) {
 		const rel = f.path;
 		const source = sourceOf(rel);
@@ -924,10 +1018,9 @@ async function collectNotesFromVault(app, prefix, sourceOf) {
 		if (!paras.length) continue;
 		const tagTopics = fmList(fm, "tags")
 			.map((t) => (t.startsWith("topic/") ? t.slice(6).replace(/-/g, " ") : t))
-			// Anonymized filter: ministry-specific tokens are deliberately kept OUT of the
-			// public plugin copies. The private builder's exclusion list is intentionally
-			// broader — do NOT widen this one to match it.
-			.filter((t) => !t.includes("/") && !/^(article|hub|devotional|teaching)$/i.test(t));
+			// The PUBLIC builder's filter, exactly (tools/publish-builder.js). The vault's own
+			// builder also drops the ministry's tag; that token stays out of the public plugin.
+			.filter((t) => !t.includes("/") && !/^(article|hub|devotional|teaching|topics|concept)$/i.test(t));
 		const topics = (fmList(fm, "topics").length ? fmList(fm, "topics") : tagTopics).slice(0, 6).join(", ");
 		out.push([
 			fmValue(fm, "title") || firstHeading(bodyRaw) || f.basename,
@@ -935,8 +1028,10 @@ async function collectNotesFromVault(app, prefix, sourceOf) {
 			fmValue(fm, "date"),
 			topics,
 			// shown as plain text on result cards — the one body-derived field that must
-			// NOT carry markers (a 240-char slice could cut one in half)
-			fmValue(fm, "excerpt") || stripLinks(paras[0]).slice(0, 240),
+			// NOT carry markers (a 240-char slice could cut one in half). The opening block,
+			// whatever its kind, except a table's HEADER row: column names say nothing.
+			fmValue(fm, "excerpt") ||
+				stripLinks(paras.find((p) => p[0] !== B_ROW || p[1] !== "h") || paras[0]).slice(0, 240),
 			rel.replace(/\.md$/, ""),
 			safeUrl(fmValue(fm, "source") || firstUrl(bodyRaw)),
 			paras.join("\n"),
@@ -3105,7 +3200,7 @@ module.exports.__testables = {
 	BOOK_ORDER, BOOK_IDS, DOWNLOADABLE, HELLOAO_API, TEMPLATE_PATH, PAYLOAD_ID,
 	VAULT_TAG, RAW, PINNED_SHA256, sha256Js, sha256Hex, fetchPinned, ensureTemplate, readCommentaryIndexMeta, mapPool,
 	apiVerseText, toParagraphs, fmValue, fmList, isHub, firstHeading, firstUrl, safeUrl,
-	LINK_MARK, stripLinks,
+	LINK_MARK, stripLinks, B_HEAD, B_ITEM, B_ROW, B_CELL, walkOrder,
 	collectNotesFromVault, buildOnThisDayFromVault, CONTENT_LAYERS, layerEnabled,
 	downloadOnThisDayPack, ONTHISDAY_PACK_PATH,
 	buildChurchHistoryFromVault, downloadChurchHistoryPack, CHURCHHISTORY_PACK_PATH,
