@@ -60,11 +60,18 @@ another device, it adopts the existing page without rebuilding.
 
 ## Network
 
-Two hosts, only during setup or rebuild. Never in the background, never on a schedule.
+Two hosts, only during setup or a rebuild. Never on a schedule.
 
 - `bible.helloao.org` — your chosen translations (Free Use Bible API)
 - `raw.githubusercontent.com` — the page template, plus whichever optional extras you
   picked (dictionary, maps, church history, on this day, prayers)
+
+The template is the search page's own HTML and JavaScript. Each plugin release pins
+one tagged version of it, and a rebuild fetches it again only when a plugin update has
+moved that pin. A template you have edited yourself is kept, never overwritten.
+
+If setup is interrupted (Obsidian closed mid-download), the remaining downloads resume
+by themselves the next time Obsidian starts. Finished files are kept.
 
 ## Translations and licensing
 

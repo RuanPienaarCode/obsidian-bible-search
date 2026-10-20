@@ -1915,7 +1915,7 @@ class OnboardingWizard extends Modal {
 		const c = this.contentEl;
 		c.empty();
 		c.createDiv({ cls: "bible-search-onb-step", text: "Downloading Bible text" });
-		const status = c.createEl("p", { text: "Starting…" });
+		const status = c.createEl("p", { text: "Starting…", attr: { role: "status" } });
 		c.createEl("p", {
 			cls: "setting-item-description",
 			text: "This takes a few minutes per translation. Closing this window won't stop it — a notice appears when everything is ready.",
@@ -2081,7 +2081,7 @@ class BibleSearchView extends ItemView {
 				|| this.plugin.storeHtmlBlob(path, file.stat, buf);
 		}
 
-		const iframe = container.createEl("iframe", { cls: "bible-search-frame" });
+		const iframe = container.createEl("iframe", { cls: "bible-search-frame", attr: { title: "Bible Search" } });
 		iframe.addEventListener("load", () => {
 			if (gen !== this.renderGen) return; // superseded between src-set and load
 			this.frame = iframe;
@@ -2163,6 +2163,21 @@ class BibleSearchView extends ItemView {
 				await ensureFolder(this.app, DATA_PATH);
 				await this.app.vault.create(MARKS_PATH, json);
 			};
+
+			/* This runs on the iframe's load event, which fires AFTER the page's own
+			   script — so the page's boot-time loadMarks() has already looked for the
+			   bridge above, found nothing, and adopted that device's localStorage. Ask it
+			   to read again now the vault is reachable; without this marks.json is never
+			   read, and the first new highlight overwrites it with the local copy.
+			   bibleSearchHostReady is the page's own hook; templates from before it
+			   existed expose loadMarks as a plain global, which does the same read. */
+			const reread = win.bibleSearchHostReady || win.loadMarks;
+			if (typeof reread === "function") {
+				try {
+					const p = reread();
+					if (p && typeof p.catch === "function") p.catch(() => { /* the page reports its own read failures */ });
+				} catch (e) { /* page gone — fine */ }
+			}
 
 			// Warm the default translation once the shell has settled, so the first
 			// search hits parsed data instead of waiting on a disk read. Held so
