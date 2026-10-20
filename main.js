@@ -2236,6 +2236,7 @@ class BibleSearchView extends ItemView {
 		this.renderGen = 0; // bumped per render / on close to invalidate stale in-flight reads
 		this.fitObserver = null; // keeps the iframe filling the leaf as it resizes
 		this._pageWaiters = []; // pageWindow() calls waiting for the frame to mount
+		this.renderFailed = false; // the last render ended in an error box, not a frame
 	}
 
 	/* Give the flex-column view a definite height taken from the leaf's own
@@ -2292,6 +2293,7 @@ class BibleSearchView extends ItemView {
 		// takes a token; if a newer one started (or the view closed) while we awaited
 		// the read, we revoke the URL we just made and bail.
 		const gen = ++this.renderGen;
+		this.renderFailed = false;
 		const container = this.contentEl;
 		container.empty();
 		container.addClass("bible-search-view");
@@ -2305,7 +2307,9 @@ class BibleSearchView extends ItemView {
 			const box = container.createDiv({ cls: "bible-search-error" });
 			box.createEl("h3", { text: title });
 			for (const line of detail) box.createEl("p", { text: line });
-			// No frame is coming, so a passage waiting on one is told why now.
+			// No frame is coming, so a passage waiting on one is told why now — and
+			// the next one to ask tries the page again (see pageWindow).
+			this.renderFailed = true;
 			this.settlePage(new Error(`${title} — ${detail[0]}`));
 		};
 
@@ -2387,8 +2391,11 @@ class BibleSearchView extends ItemView {
 	/* Resolves with the page's window once this view's frame has mounted — at once
 	 * when it already has. A render in flight (the view has just opened, or a rebuild
 	 * is re-mounting it) is waited out, not raced: render() clears this.frame before
-	 * it reads, so a frame present here is the live one. Rejects when the render ends
-	 * in an error box, the view closes first, or nothing mounts within PAGE_WAIT_MS. */
+	 * it reads, so a frame present here is the live one. A view already showing an
+	 * error box (the page was still syncing, say) renders again rather than leaving
+	 * the caller to wait for a frame no render is bringing. Rejects when the render
+	 * ends in an error box, the view closes first, or nothing mounts within
+	 * PAGE_WAIT_MS. */
 	pageWindow(timeoutMs = PAGE_WAIT_MS) {
 		const win = this.frame && this.frame.contentWindow;
 		if (win) return Promise.resolve(win);
@@ -2401,6 +2408,7 @@ class BibleSearchView extends ItemView {
 				reject(new Error("Bible Search took too long to load — try again in a moment."));
 			}, timeoutMs);
 			this._pageWaiters.push(waiter);
+			if (this.renderFailed) this.render();
 		});
 	}
 
@@ -3217,10 +3225,12 @@ class BibleSearchPlugin extends Plugin {
 	 * at the first verse named, with that verse's study card open; a bare chapter
 	 * opens at its top.
 	 *
-	 * Resolves true once the reader is on the passage. Resolves false, having opened
-	 * nothing, when this vault has no search page yet — a caller's cue to fall back
-	 * to whatever it does without Bible Search. Throws, with a message meant for a
-	 * person, when the page is there but can't open this reference. */
+	 * Resolves true once the reader has opened at the reference; text the page can't
+	 * show there (a chapter the translation lacks, a sidecar still syncing) is
+	 * reported by the reader itself. Resolves false, having opened nothing, when this
+	 * vault has no search page yet — a caller's cue to fall back to whatever it does
+	 * without Bible Search. Rejects, with a message meant for a person, when the page
+	 * is there but can't open this reference. */
 	async openPassage(ref) {
 		if (typeof ref !== "string" || !ref.trim()) throw new TypeError('openPassage takes a reference string, such as "John 15:5".');
 		if (this._unloaded || !this.hasData()) return false;
@@ -3236,9 +3246,13 @@ class BibleSearchPlugin extends Plugin {
 		if (typeof win.parseRef !== "function" || typeof win.openVerse !== "function" || typeof win.chosenTrans !== "function") {
 			throw new Error('This search page can\'t open passages yet — run "Bible Search: Rebuild search index".');
 		}
-		const r = win.parseRef(text);
+		// What the page throws is an Error of the iframe's realm, where a caller's
+		// `instanceof Error` is false — pass it on as one of ours.
+		const ours = (e) => new Error(String((e && e.message) || e));
+		let r;
+		try { r = win.parseRef(text); } catch (e) { throw ours(e); }
 		if (!r || !(r.bi >= 0)) throw notARef();
-		await win.openVerse(win.chosenTrans(), r.bi, r.ch, r.v1);
+		try { await win.openVerse(win.chosenTrans(), r.bi, r.ch, r.v1); } catch (e) { throw ours(e); }
 		return true;
 	}
 

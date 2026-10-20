@@ -92,11 +92,12 @@ if (bs && bs.api && bs.api.openPassage) {
 | | |
 | --- | --- |
 | `api.version` | `1`. Moves only if `openPassage` changes in a way that breaks a caller. |
-| `api.openPassage(ref)` | Returns a promise. `true` once the reader shows the passage. `false`, with nothing opened, when this vault has no search page yet: your cue to fall back. Rejects with an `Error` worded for the reader when the page is there but can't open the reference; the view stays open. A `ref` that isn't a non-empty string is a `TypeError`, thrown before anything opens. |
+| `api.openPassage(ref)` | Returns a promise. `true` once the reader has opened at the reference. `false`, with nothing opened, when this vault has no search page yet: your cue to fall back. Rejects with an `Error` worded for the reader when the page is there but can't open the reference; the view stays open. A `ref` that isn't a non-empty string rejects with a `TypeError` before anything opens. |
 
 Look the plugin up on each use rather than keeping `api`. After Bible Search is disabled
-or reloaded, an `api` kept from before answers `false`. If a translation's text can't be
-read yet (still syncing, say), the reader says so itself.
+or reloaded, an `api` kept from before answers `false`. When the reader opens but has no
+text to show there (a chapter the translation doesn't have, or a translation still
+syncing), it says so itself, and `openPassage` has still done its job.
 
 ## Network
 
