@@ -301,9 +301,9 @@ const DOWNLOADABLE = [
 // without having been part of a reviewed release. Both are written by
 // tools/pin-release.js from the tag itself.
 // BEGIN PINNED — written by tools/pin-release.js; never edit by hand
-const VAULT_TAG = "v1.2.46";
+const VAULT_TAG = "v1.2.47";
 const PINNED_SHA256 = {
-	"Bible/bible-search-template.html": "528650bdce98086c36503f63b677e39abe851b8ea70cf6fadb7d1119e32ae0e3",
+	"Bible/bible-search-template.html": "477d078b3702cf4876445725f7a72aa8c620a872f034cf5fa1aefafc054644ee",
 	"data/allotments.json": "8fa44d7c48c9700752cf49e4847778a169d7745d546011093af2917ffdc779b7",
 	"data/basemap-world.json": "6115947df678db8eec0ff99ea3ac302ca77a80aa150c1b84e2b5650a2f09c1f1",
 	"data/basemap.json": "de8d45688d51228f1ef92aebd7083b2bbd4582c612fa951c64711f9465974576",
